@@ -180,6 +180,7 @@
       <button type="button" class="category-btn" data-category="commodities">Товары</button>
       <button type="button" class="category-btn" data-category="stocks">Акции (фьюч)</button>
       <button type="button" class="category-btn" data-category="shares">Спот</button>
+      <button type="button" class="category-btn" data-category="other">Другое</button>
     </div>
     <div class="settings-list" id="settingsList"></div>
     <div style="margin-top: 0.75rem;">
@@ -326,11 +327,11 @@
     }
 
     function getCategoryCounts() {
-      const counts = { all: allFutures.length, metals: 0, crypto: 0, indices: 0, currencies: 0, commodities: 0, stocks: 0, shares: 0 };
+      const counts = { all: allFutures.length, metals: 0, crypto: 0, indices: 0, currencies: 0, commodities: 0, stocks: 0, shares: 0, other: 0 };
       allFutures.forEach(f => {
         const cat = detectCategory(f.ticker, f.name, f.instrument_type);
         if (counts[cat] !== undefined) counts[cat]++;
-        // "other" не показываем как отдельную категорию - они в "Все"
+        else counts.other++;
       });
       return counts;
     }
