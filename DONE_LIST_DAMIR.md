@@ -65,4 +65,23 @@
 
 ---
 
+## 2026-02-12 — Сессия 3: Git и Деплой
+
+### Git-репозиторий
+- Создан публичный репозиторий: https://github.com/nikkronos/Futures_auction
+- Добавлен `.gitignore` (Python, env, IDE)
+- Все файлы запушены (17 файлов, 1146+ строк)
+
+### Деплой на Timeweb
+- Сервер: 81.200.146.32
+- Путь: `/opt/futures_auction`
+- Python venv: `/opt/futures_auction/.venv`
+- Токен: `env_vars.txt` (SANDBOX=0 — боевой контур)
+- systemd service: `futures_auction.service` (enabled, running)
+
+### Результат
+- **Виджет доступен 24/7:** http://81.200.146.32:5000
+
+---
+
 **Обновлено:** 2026-02-12
