@@ -106,43 +106,64 @@ def index():
 
 @app.route("/api/futures")
 def api_futures():
-    """Список фьючерсов для настроек (галочки). Кэшируется на 5 минут."""
+    """Список фьючерсов + акций (спот) для настроек. Кэшируется на 5 минут."""
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
         logger.warning("TINKOFF_INVEST_TOKEN not set")
         return jsonify({"error": "TINKOFF_INVEST_TOKEN not set"}), 503
 
     # Проверяем кэш
-    cache_key = "futures_list"
+    cache_key = "instruments_list"
     cached = _cache_get(cache_key)
     if cached is not None:
-        logger.debug("futures list from cache")
+        logger.debug("instruments list from cache")
         return jsonify({"futures": cached, "cached": True})
 
-    url = f"{_get_api_url()}/tinkoff.public.invest.api.contract.v1.InstrumentsService/Futures"
+    base_url = _get_api_url()
+    headers = _get_headers()
+    items = []
+
+    # 1. Загружаем фьючерсы
     try:
-        resp = requests.post(url, headers=_get_headers(), json={}, timeout=30, verify=False)
+        url = f"{base_url}/tinkoff.public.invest.api.contract.v1.InstrumentsService/Futures"
+        resp = requests.post(url, headers=headers, json={}, timeout=30, verify=False)
         resp.raise_for_status()
         data = resp.json()
-        instruments = data.get("instruments", [])
-        items = []
-        for inv in instruments:
+        for inv in data.get("instruments", []):
             items.append({
                 "figi": inv.get("figi", ""),
                 "ticker": inv.get("ticker", ""),
                 "name": inv.get("name") or inv.get("ticker", ""),
                 "instrument_uid": inv.get("uid", "") or inv.get("figi", ""),
+                "instrument_type": "futures",
             })
-        logger.info("futures count=%s (fresh)", len(items))
-        # Сохраняем в кэш
-        _cache_set(cache_key, items, CACHE_TTL_FUTURES)
-        return jsonify({"futures": items})
-    except requests.RequestException as e:
-        logger.exception("T-Invest API error: %s", e)
-        return jsonify({"error": str(e)}), 502
+        logger.info("futures count=%s", len(items))
     except Exception as e:
-        logger.exception("Unexpected error: %s", e)
-        return jsonify({"error": str(e)}), 500
+        logger.exception("Error loading futures: %s", e)
+
+    # 2. Загружаем акции (спот)
+    try:
+        url = f"{base_url}/tinkoff.public.invest.api.contract.v1.InstrumentsService/Shares"
+        resp = requests.post(url, headers=headers, json={}, timeout=30, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        shares_count = 0
+        for inv in data.get("instruments", []):
+            items.append({
+                "figi": inv.get("figi", ""),
+                "ticker": inv.get("ticker", ""),
+                "name": inv.get("name") or inv.get("ticker", ""),
+                "instrument_uid": inv.get("uid", "") or inv.get("figi", ""),
+                "instrument_type": "shares",
+            })
+            shares_count += 1
+        logger.info("shares count=%s", shares_count)
+    except Exception as e:
+        logger.exception("Error loading shares: %s", e)
+
+    logger.info("total instruments=%s (fresh)", len(items))
+    _cache_set(cache_key, items, CACHE_TTL_FUTURES)
+    return jsonify({"futures": items})
 
 
 def _fetch_candles_for_instrument(instrument_id, base_url, headers, from_ts, to_ts):

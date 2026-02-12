@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Виджет — Таблица фьючерсов | Т-Инвестиции</title>
+  <title>Виджет — Таблица инструментов | Т-Инвестиции</title>
   <style>
     :root {
       --bg: #1a1d23;
@@ -154,7 +154,7 @@
   </style>
 </head>
 <body>
-  <h1>Таблица фьючерсов — Т-Инвестиции</h1>
+  <h1>Таблица инструментов — Т-Инвестиции</h1>
   <div class="toolbar">
     <button type="button" id="btnRefresh">Обновить</button>
     <button type="button" id="btnSettings">Настройки</button>
@@ -178,7 +178,9 @@
       <button type="button" class="category-btn" data-category="indices">Индексы</button>
       <button type="button" class="category-btn" data-category="currencies">Валюты</button>
       <button type="button" class="category-btn" data-category="commodities">Товары</button>
-      <button type="button" class="category-btn" data-category="stocks">Акции</button>
+      <button type="button" class="category-btn" data-category="stocks">Акции (фьюч)</button>
+      <button type="button" class="category-btn" data-category="shares">Спот</button>
+      <button type="button" class="category-btn" data-category="other">Другое</button>
     </div>
     <div class="settings-list" id="settingsList"></div>
     <div style="margin-top: 0.75rem;">
@@ -280,11 +282,16 @@
       }
     };
 
-    function detectCategory(ticker, name) {
+    function detectCategory(ticker, name, instrumentType) {
+      // Если это акция (спот) - сразу в категорию "shares"
+      if (instrumentType === 'shares') {
+        return 'shares';
+      }
+      
       const tickerUpper = (ticker || '').toUpperCase();
       const nameLower = (name || '').toLowerCase();
       
-      // Сначала проверяем, не является ли это акцией (приоритетная проверка)
+      // Для фьючерсов - проверяем, не является ли это фьючерсом на акцию
       for (const stockTicker of STOCK_TICKERS) {
         if (tickerUpper.includes(stockTicker.toUpperCase())) {
           return 'stocks';
@@ -310,9 +317,9 @@
     }
 
     function getCategoryCounts() {
-      const counts = { all: allFutures.length, metals: 0, crypto: 0, indices: 0, currencies: 0, commodities: 0, stocks: 0, other: 0 };
+      const counts = { all: allFutures.length, metals: 0, crypto: 0, indices: 0, currencies: 0, commodities: 0, stocks: 0, shares: 0, other: 0 };
       allFutures.forEach(f => {
-        const cat = detectCategory(f.ticker, f.name);
+        const cat = detectCategory(f.ticker, f.name, f.instrument_type);
         if (counts[cat] !== undefined) counts[cat]++;
         else counts.other++;
       });
@@ -367,7 +374,7 @@
       const r = await fetch('/api/futures');
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
-        showMsg(err.error || 'Ошибка загрузки списка фьючерсов', 'error');
+        showMsg(err.error || 'Ошибка загрузки списка инструментов', 'error');
         return [];
       }
       const data = await r.json();
@@ -388,7 +395,7 @@
       allFutures.forEach(f => {
         const id = f.instrument_uid || f.figi;
         const displayName = (f.name || f.ticker) + ' (' + f.ticker + ')';
-        const category = detectCategory(f.ticker, f.name);
+        const category = detectCategory(f.ticker, f.name, f.instrument_type);
         
         const matchesSearch = !filterLower || 
           displayName.toLowerCase().includes(filterLower) ||
