@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ========== Кэширование ==========
 # TTL в секундах
 CACHE_TTL_FUTURES = 300  # 5 минут - список фьючерсов редко меняется
-CACHE_TTL_CANDLES = 5    # 5 секунд - для обновления раз в секунду
+CACHE_TTL_CANDLES = 10   # 10 секунд - для обновления раз в 5 секунд
 
 _cache = {}
 _cache_lock = threading.Lock()
@@ -278,6 +278,135 @@ def api_table():
 
     logger.info("table: total=%d, cached=%d, fresh=%d", len(rows), cached_count, len(rows) - cached_count)
     return jsonify({"rows": rows})
+
+
+def _is_auction_time():
+    """Проверить, сейчас ли время аукциона (по московскому времени)."""
+    # Московское время = UTC + 3
+    now_utc = datetime.now(timezone.utc)
+    moscow_offset = timedelta(hours=3)
+    now_msk = now_utc + moscow_offset
+    
+    hour = now_msk.hour
+    minute = now_msk.minute
+    weekday = now_msk.weekday()  # 0=пн, 6=вс
+    
+    time_minutes = hour * 60 + minute
+    
+    # Аукцион открытия: Пн-Пт 8:50-9:00, Сб-Вс 9:50-10:00
+    if weekday < 5:  # Пн-Пт
+        opening_start = 8 * 60 + 50  # 8:50
+        opening_end = 9 * 60  # 9:00
+    else:  # Сб-Вс
+        opening_start = 9 * 60 + 50  # 9:50
+        opening_end = 10 * 60  # 10:00
+    
+    # Аукцион закрытия: 18:40-18:50 (каждый день)
+    closing_start = 18 * 60 + 40  # 18:40
+    closing_end = 18 * 60 + 50  # 18:50
+    
+    is_opening = opening_start <= time_minutes < opening_end
+    is_closing = closing_start <= time_minutes < closing_end
+    
+    return {
+        "is_auction": is_opening or is_closing,
+        "auction_type": "opening" if is_opening else ("closing" if is_closing else None),
+        "moscow_time": now_msk.strftime("%H:%M:%S"),
+    }
+
+
+def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
+    """Получить стакан для инструмента."""
+    cache_key = f"orderbook_{instrument_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached, True
+    
+    try:
+        url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetOrderBook"
+        payload = {
+            "instrumentId": instrument_id,
+            "depth": depth,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=10, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+        
+        best_bid = _quotation_to_float(bids[0].get("price")) if bids else None
+        best_ask = _quotation_to_float(asks[0].get("price")) if asks else None
+        
+        # Суммарный объём заявок
+        total_bid_lots = sum(int(b.get("quantity", 0)) for b in bids)
+        total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
+        
+        # Приблизительная цена аукциона (середина спреда)
+        auction_price = None
+        if best_bid and best_ask:
+            auction_price = round((best_bid + best_ask) / 2, 4)
+        
+        # Последняя цена
+        last_price = _quotation_to_float(data.get("lastPrice"))
+        close_price = _quotation_to_float(data.get("closePrice"))
+        
+        # Отклонение от последней цены
+        deviation_pct = None
+        reference_price = last_price or close_price
+        if auction_price and reference_price and reference_price != 0:
+            deviation_pct = round((auction_price - reference_price) / reference_price * 100, 2)
+        
+        result = {
+            "instrument_id": instrument_id,
+            "best_bid": round(best_bid, 4) if best_bid else None,
+            "best_ask": round(best_ask, 4) if best_ask else None,
+            "spread": round(best_ask - best_bid, 4) if (best_bid and best_ask) else None,
+            "auction_price": auction_price,
+            "last_price": round(last_price, 4) if last_price else None,
+            "close_price": round(close_price, 4) if close_price else None,
+            "deviation_pct": deviation_pct,
+            "total_bid_lots": total_bid_lots,
+            "total_ask_lots": total_ask_lots,
+            "total_lots": total_bid_lots + total_ask_lots,
+        }
+        
+        # Кэш на 1 секунду для стакана
+        # Кэш на 5 секунд для стакана
+        _cache_set(cache_key, result, 5)
+        return result, False
+    except Exception as e:
+        logger.warning("get_orderbook %s: %s", instrument_id, e)
+        return {
+            "instrument_id": instrument_id,
+            "error": str(e),
+        }, False
+
+
+@app.route("/api/orderbook")
+def api_orderbook():
+    """Данные стакана для аукциона."""
+    token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
+    if not token:
+        return jsonify({"error": "TINKOFF_INVEST_TOKEN not set"}), 503
+
+    ids_param = request.args.get("ids", "")
+    if not ids_param:
+        return jsonify({"rows": [], "auction": _is_auction_time()})
+    
+    instrument_ids = [x.strip() for x in ids_param.split(",") if x.strip()]
+    
+    base_url = _get_api_url()
+    headers = _get_headers()
+    
+    rows = []
+    for instrument_id in instrument_ids:
+        result, _ = _fetch_orderbook(instrument_id, base_url, headers)
+        rows.append(result)
+    
+    auction_info = _is_auction_time()
+    logger.info("orderbook: total=%d, auction=%s", len(rows), auction_info.get("is_auction"))
+    return jsonify({"rows": rows, "auction": auction_info})
 
 
 def main():

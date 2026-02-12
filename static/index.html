@@ -151,6 +151,26 @@
     .msg.info { background: rgba(0,200,83,0.1); color: #69f0ae; }
     .loading { opacity: 0.7; }
     .last-update { font-size: 0.75rem; color: var(--muted); margin-left: auto; }
+    .auction-badge {
+      background: #ff9800;
+      color: #000;
+      padding: 0.25rem 0.5rem;
+      border-radius: 4px;
+      font-size: 0.75rem;
+      font-weight: 600;
+      margin-left: 0.5rem;
+      animation: pulse 1s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+    .mode-indicator {
+      font-size: 0.8rem;
+      color: var(--muted);
+      margin-left: 0.5rem;
+    }
+    .mode-indicator.auction { color: #ff9800; }
   </style>
 </head>
 <body>
@@ -158,8 +178,11 @@
   <div class="toolbar">
     <button type="button" id="btnRefresh">Обновить</button>
     <button type="button" id="btnSettings">Настройки</button>
+    <button type="button" id="btnMode">Режим: Свечи</button>
     <button type="button" id="btnAutoRefresh">Авто: ВКЛ</button>
-    <span class="auto-status active" id="autoStatus">обновление каждые 1 сек</span>
+    <span class="auto-status active" id="autoStatus">обновление каждые 5 сек</span>
+    <span class="mode-indicator" id="modeIndicator"></span>
+    <span id="auctionBadge"></span>
     <span class="last-update" id="lastUpdate"></span>
   </div>
   <div id="message"></div>
@@ -188,8 +211,8 @@
     </div>
   </div>
   <div class="table-wrap">
-    <table>
-      <thead>
+    <table id="mainTable">
+      <thead id="tableHead">
         <tr>
           <th data-sort="name">Актив <span class="sort-icon"></span></th>
           <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
@@ -206,7 +229,7 @@
   <script>
     const STORAGE_IDS = 'damir_futures_selected_ids';
     const STORAGE_NAMES = 'damir_futures_names';
-    const AUTO_REFRESH_INTERVAL = 1000; // 1 секунда
+    const AUTO_REFRESH_INTERVAL = 5000; // 5 секунд
 
     let allFutures = [];
     let selectedIds = new Set(JSON.parse(localStorage.getItem(STORAGE_IDS) || '[]'));
@@ -217,6 +240,8 @@
     let currentRows = [];
     let sortColumn = 'name';
     let sortDirection = 'asc';
+    let viewMode = 'candles'; // 'candles' или 'orderbook'
+    let auctionInfo = null;
 
     // Тикеры фьючерсов на акции (коды фьючерсов отличаются от акций!)
     const STOCK_TICKERS = [
@@ -552,6 +577,137 @@
       }
     }
 
+    async function loadOrderbook() {
+      const ids = Array.from(selectedIds).filter(Boolean);
+      if (ids.length === 0) {
+        currentRows = [];
+        renderOrderbookTable([]);
+        return;
+      }
+      setLoading(true);
+      showMsg('');
+      try {
+        const r = await fetch('/api/orderbook?ids=' + encodeURIComponent(ids.join(',')));
+        if (!r.ok) {
+          const err = await r.json().catch(() => ({}));
+          showMsg(err.error || 'Ошибка загрузки стакана', 'error');
+          currentRows = [];
+          renderOrderbookTable([]);
+          return;
+        }
+        const data = await r.json();
+        auctionInfo = data.auction || null;
+        currentRows = data.rows || [];
+        currentRows.forEach(row => {
+          row.name = namesMap[row.instrument_id] || row.instrument_id;
+        });
+        renderOrderbookTable(currentRows);
+        updateAuctionBadge();
+        updateLastUpdate();
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function updateAuctionBadge() {
+      const badge = document.getElementById('auctionBadge');
+      const indicator = document.getElementById('modeIndicator');
+      if (auctionInfo && auctionInfo.is_auction) {
+        const type = auctionInfo.auction_type === 'opening' ? 'ОТКРЫТИЕ' : 'ЗАКРЫТИЕ';
+        badge.innerHTML = '<span class="auction-badge">АУКЦИОН ' + type + '</span>';
+        indicator.textContent = 'МСК: ' + auctionInfo.moscow_time;
+        indicator.classList.add('auction');
+      } else {
+        badge.innerHTML = '';
+        if (auctionInfo) {
+          indicator.textContent = 'МСК: ' + auctionInfo.moscow_time;
+        }
+        indicator.classList.remove('auction');
+      }
+    }
+
+    function updateTableHeader() {
+      const thead = document.getElementById('tableHead');
+      if (viewMode === 'orderbook') {
+        thead.innerHTML = `
+          <tr>
+            <th>Актив</th>
+            <th class="num">Bid</th>
+            <th class="num">Ask</th>
+            <th class="num">Цена аукц.</th>
+            <th class="num">Откл. %</th>
+            <th class="num">Лоты</th>
+          </tr>
+        `;
+      } else {
+        thead.innerHTML = `
+          <tr>
+            <th data-sort="name">Актив <span class="sort-icon"></span></th>
+            <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
+            <th class="num" data-sort="open">Цена открытия <span class="sort-icon"></span></th>
+            <th class="num" data-sort="change">Изменение % <span class="sort-icon"></span></th>
+          </tr>
+        `;
+        // Re-attach sort listeners
+        document.querySelectorAll('th[data-sort]').forEach(th => {
+          th.addEventListener('click', () => handleSort(th.dataset.sort));
+        });
+        updateSortIcons();
+      }
+    }
+
+    function renderOrderbookTable(rows) {
+      const tbody = document.getElementById('tableBody');
+      if (!rows || rows.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="6">Нет данных стакана.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = rows.map(row => {
+        const name = row.name || row.instrument_id;
+        const bid = row.best_bid != null ? formatPrice(row.best_bid) : '—';
+        const ask = row.best_ask != null ? formatPrice(row.best_ask) : '—';
+        const auctionPrice = row.auction_price != null ? formatPrice(row.auction_price) : '—';
+        let devPct = '—';
+        let devClass = 'pct-null';
+        if (row.deviation_pct != null) {
+          devPct = row.deviation_pct > 0 ? '+' + row.deviation_pct : String(row.deviation_pct);
+          devClass = row.deviation_pct > 0 ? 'pct-positive' : row.deviation_pct < 0 ? 'pct-negative' : 'pct-null';
+        }
+        const lots = row.total_lots != null ? row.total_lots : '—';
+        return (
+          '<tr>' +
+          '<td>' + escapeHtml(name) + '</td>' +
+          '<td class="num pct-positive">' + bid + '</td>' +
+          '<td class="num pct-negative">' + ask + '</td>' +
+          '<td class="num">' + auctionPrice + '</td>' +
+          '<td class="num ' + devClass + '">' + devPct + (row.deviation_pct != null ? '%' : '') + '</td>' +
+          '<td class="num">' + lots + '</td>' +
+          '</tr>'
+        );
+      }).join('');
+    }
+
+    function toggleMode() {
+      viewMode = viewMode === 'candles' ? 'orderbook' : 'candles';
+      const btn = document.getElementById('btnMode');
+      btn.textContent = viewMode === 'candles' ? 'Режим: Свечи' : 'Режим: Стакан';
+      if (viewMode === 'orderbook') {
+        btn.classList.add('active');
+      } else {
+        btn.classList.remove('active');
+      }
+      updateTableHeader();
+      loadData();
+    }
+
+    function loadData() {
+      if (viewMode === 'orderbook') {
+        loadOrderbook();
+      } else {
+        loadTable();
+      }
+    }
+
     function toggleSettings() {
       const panel = document.getElementById('settingsPanel');
       const isVisible = panel.style.display !== 'none';
@@ -576,7 +732,7 @@
         localStorage.setItem(STORAGE_IDS, JSON.stringify(Array.from(selectedIds)));
       } catch (_) {}
       document.getElementById('settingsPanel').style.display = 'none';
-      loadTable();
+      loadData();
     }
 
     function selectAll() {
@@ -611,7 +767,7 @@
     function startAutoRefresh() {
       stopAutoRefresh();
       if (autoRefreshEnabled && selectedIds.size > 0) {
-        autoRefreshTimer = setInterval(loadTable, AUTO_REFRESH_INTERVAL);
+        autoRefreshTimer = setInterval(loadData, AUTO_REFRESH_INTERVAL);
       }
     }
 
@@ -633,8 +789,9 @@
     }
 
     // Event listeners
-    document.getElementById('btnRefresh').addEventListener('click', loadTable);
+    document.getElementById('btnRefresh').addEventListener('click', loadData);
     document.getElementById('btnSettings').addEventListener('click', toggleSettings);
+    document.getElementById('btnMode').addEventListener('click', toggleMode);
     document.getElementById('btnSaveSettings').addEventListener('click', () => {
       saveSettings();
       startAutoRefresh();
@@ -661,7 +818,7 @@
       try {
         await loadFutures();
         if (selectedIds.size > 0) {
-          await loadTable();
+          await loadData();
           startAutoRefresh();
         } else {
           renderTable([]);
