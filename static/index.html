@@ -67,7 +67,11 @@
     th {
       color: var(--muted);
       font-weight: 600;
+      cursor: pointer;
+      user-select: none;
     }
+    th:hover { color: var(--accent); }
+    th .sort-icon { margin-left: 0.3rem; font-size: 0.7rem; }
     tr:last-child td { border-bottom: none; }
     tr:hover td { background: rgba(255,255,255,0.03); }
     .num { text-align: right; font-variant-numeric: tabular-nums; }
@@ -155,12 +159,12 @@
     <button type="button" id="btnRefresh">Обновить</button>
     <button type="button" id="btnSettings">Настройки</button>
     <button type="button" id="btnAutoRefresh">Авто: ВКЛ</button>
-    <span class="auto-status active" id="autoStatus">обновление каждые 5 сек</span>
+    <span class="auto-status active" id="autoStatus">обновление каждые 1 сек</span>
     <span class="last-update" id="lastUpdate"></span>
   </div>
   <div id="message"></div>
   <div id="settingsPanel" class="settings-panel" style="display: none;">
-    <h2>Выберите фьючерсы для отображения</h2>
+    <h2>Выберите инструменты для отображения</h2>
     <div class="settings-toolbar">
       <input type="text" class="search-input" id="searchInput" placeholder="Поиск по названию или тикеру...">
       <button type="button" id="btnSelectAll">Все</button>
@@ -185,10 +189,10 @@
     <table>
       <thead>
         <tr>
-          <th>Актив</th>
-          <th class="num">Цена закрытия</th>
-          <th class="num">Цена открытия</th>
-          <th class="num">Изменение %</th>
+          <th data-sort="name">Актив <span class="sort-icon"></span></th>
+          <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
+          <th class="num" data-sort="open">Цена открытия <span class="sort-icon"></span></th>
+          <th class="num" data-sort="change">Изменение % <span class="sort-icon"></span></th>
         </tr>
       </thead>
       <tbody id="tableBody">
@@ -200,7 +204,7 @@
   <script>
     const STORAGE_IDS = 'damir_futures_selected_ids';
     const STORAGE_NAMES = 'damir_futures_names';
-    const AUTO_REFRESH_INTERVAL = 5000; // 5 секунд
+    const AUTO_REFRESH_INTERVAL = 1000; // 1 секунда
 
     let allFutures = [];
     let selectedIds = new Set(JSON.parse(localStorage.getItem(STORAGE_IDS) || '[]'));
@@ -208,8 +212,47 @@
     let autoRefreshEnabled = true;
     let autoRefreshTimer = null;
     let activeCategory = 'all';
+    let currentRows = [];
+    let sortColumn = 'name';
+    let sortDirection = 'asc';
 
-    // Категоризация фьючерсов по тикеру/названию
+    // Тикеры акций — всегда относятся к категории stocks (исключения из других категорий)
+    const STOCK_TICKERS = [
+      'PLZL', 'POLY',  // Полюс, Полиметалл — не металлы
+      'LEAS', 'EUTR',  // Европлан — не валюта
+      'TATN', 'TATNP', // Татнефть, Татнефть-п
+      'TRNF', 'TRNFP', // Транснефть
+      'SNGS', 'SNGSP', // Сургутнефтегаз
+      'GAZP',          // Газпром
+      'SIBN',          // Газпромнефть
+      'BANE', 'BANEP', // Башнефть
+      'RNFT',          // Русснефть
+      'ROSN',          // Роснефть
+      'LKOH',          // Лукойл
+      'SBER', 'SBERP', // Сбербанк
+      'VTBR',          // ВТБ
+      'GMKN',          // Норникель
+      'NVTK',          // Новатэк
+      'YNDX',          // Яндекс
+      'MTSS',          // МТС
+      'MAGN',          // ММК
+      'NLMK',          // НЛМК
+      'CHMF',          // Северсталь
+      'ALRS',          // АЛРОСА
+      'AFLT',          // Аэрофлот
+      'MOEX',          // Мосбиржа
+      'TCSG',          // Тинькофф
+      'RUAL',          // РУСАЛ
+      'PIKK',          // ПИК
+      'MGNT',          // Магнит
+      'PHOR',          // Фосагро
+      'FEES',          // ФСК
+      'HYDR',          // РусГидро
+      'IRAO',          // Интер РАО
+      'RTKM', 'RTKMP', // Ростелеком
+    ];
+
+    // Категоризация по тикеру/названию
     const CATEGORY_RULES = {
       metals: {
         tickers: ['GOLD', 'SILV', 'PLAT', 'PALL', 'GD', 'SV', 'PT', 'PD'],
@@ -220,20 +263,20 @@
         keywords: ['биткоин', 'эфир', 'крипт', 'bitcoin', 'ethereum', 'crypto']
       },
       indices: {
-        tickers: ['MIX', 'IMOEX', 'RTS', 'RTSI', 'MOEX'],
-        keywords: ['индекс', 'index', 'мосбирж']
+        tickers: ['MIX', 'IMOEX', 'RTS', 'RTSI'],
+        keywords: ['индекс', 'index']
       },
       currencies: {
-        tickers: ['USD', 'EUR', 'CNY', 'GBP', 'JPY', 'CHF', 'USDRUB', 'EURRUB', 'CNYRUB'],
-        keywords: ['курс', 'доллар', 'евро', 'юань', 'рубл', 'валют', 'currency']
+        tickers: ['Si', 'Eu', 'CNY', 'GBP', 'JPY', 'CHF', 'USDRUB', 'EURRUB', 'CNYRUB'],
+        keywords: ['курс доллар', 'курс евро', 'курс юан', 'currency']
       },
       commodities: {
-        tickers: ['BR', 'BRENT', 'NG', 'CL', 'WHEAT', 'CORN', 'SOYB', 'SUGAR', 'COFFEE'],
-        keywords: ['нефт', 'газ', 'пшениц', 'кукуруз', 'соя', 'сахар', 'кофе', 'oil', 'brent', 'natural gas', 'wheat']
+        tickers: ['BR', 'NG', 'CL', 'WHEAT', 'CORN', 'SOYB', 'SUGAR', 'COFFEE', 'Co', 'WH'],
+        keywords: ['нефть brent', 'природный газ', 'пшениц', 'кукуруз', 'соя', 'сахар', 'кофе', 'wheat', 'natural gas']
       },
       stocks: {
-        tickers: ['SBER', 'GAZP', 'LKOH', 'GMKN', 'NVTK', 'ROSN', 'YNDX', 'MTSS', 'MAGN', 'NLMK', 'CHMF', 'ALRS', 'POLY', 'PLZL', 'AFLT', 'AEROFLOT', 'VTBR', 'MOEX', 'TCSG', 'RUAL'],
-        keywords: ['сбер', 'газпром', 'лукойл', 'норникел', 'новатэк', 'роснефть', 'яндекс', 'мтс', 'ммк', 'нлмк', 'северстал', 'алроса', 'полюс', 'аэрофлот', 'втб', 'тинькофф', 'русал']
+        tickers: STOCK_TICKERS,
+        keywords: []
       }
     };
 
@@ -241,14 +284,22 @@
       const tickerUpper = (ticker || '').toUpperCase();
       const nameLower = (name || '').toLowerCase();
       
+      // Сначала проверяем, не является ли это акцией (приоритетная проверка)
+      for (const stockTicker of STOCK_TICKERS) {
+        if (tickerUpper.includes(stockTicker.toUpperCase())) {
+          return 'stocks';
+        }
+      }
+      
+      // Проверяем остальные категории
       for (const [category, rules] of Object.entries(CATEGORY_RULES)) {
-        // Проверка по тикеру
+        if (category === 'stocks') continue; // уже проверили
+        
         for (const t of rules.tickers) {
           if (tickerUpper.includes(t.toUpperCase())) {
             return category;
           }
         }
-        // Проверка по ключевым словам в названии
         for (const kw of rules.keywords) {
           if (nameLower.includes(kw.toLowerCase())) {
             return category;
@@ -303,7 +354,6 @@
 
     function formatPrice(value) {
       if (value == null) return '—';
-      // Умное округление: убираем лишние нули
       if (Math.abs(value) >= 1000) {
         return value.toFixed(2).replace(/\.?0+$/, '');
       } else if (Math.abs(value) >= 1) {
@@ -380,14 +430,55 @@
       filterSettings();
     }
 
-    function renderTable(rows, nameByFigi) {
+    function sortRows(rows) {
+      return [...rows].sort((a, b) => {
+        let valA, valB;
+        switch (sortColumn) {
+          case 'name':
+            valA = (a.name || '').toLowerCase();
+            valB = (b.name || '').toLowerCase();
+            break;
+          case 'close':
+            valA = a.close ?? -Infinity;
+            valB = b.close ?? -Infinity;
+            break;
+          case 'open':
+            valA = a.open ?? -Infinity;
+            valB = b.open ?? -Infinity;
+            break;
+          case 'change':
+            valA = a.change_pct ?? -Infinity;
+            valB = b.change_pct ?? -Infinity;
+            break;
+          default:
+            return 0;
+        }
+        if (valA < valB) return sortDirection === 'asc' ? -1 : 1;
+        if (valA > valB) return sortDirection === 'asc' ? 1 : -1;
+        return 0;
+      });
+    }
+
+    function updateSortIcons() {
+      document.querySelectorAll('th[data-sort]').forEach(th => {
+        const icon = th.querySelector('.sort-icon');
+        if (th.dataset.sort === sortColumn) {
+          icon.textContent = sortDirection === 'asc' ? '▲' : '▼';
+        } else {
+          icon.textContent = '';
+        }
+      });
+    }
+
+    function renderTable(rows) {
       const tbody = document.getElementById('tableBody');
       if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4">Выберите фьючерсы в настройках или данных пока нет.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="4">Выберите инструменты в настройках или данных пока нет.</td></tr>';
         return;
       }
-      tbody.innerHTML = rows.map(row => {
-        const name = nameByFigi[row.instrument_id] || row.name || row.instrument_id;
+      const sorted = sortRows(rows);
+      tbody.innerHTML = sorted.map(row => {
+        const name = row.name || row.instrument_id;
         const close = formatPrice(row.close);
         const open = formatPrice(row.open);
         let pct = '—';
@@ -405,6 +496,7 @@
           '</tr>'
         );
       }).join('');
+      updateSortIcons();
     }
 
     function escapeHtml(s) {
@@ -416,7 +508,8 @@
     async function loadTable() {
       const ids = Array.from(selectedIds).filter(Boolean);
       if (ids.length === 0) {
-        renderTable([], namesMap);
+        currentRows = [];
+        renderTable([]);
         return;
       }
       setLoading(true);
@@ -426,17 +519,16 @@
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showMsg(err.error || 'Ошибка загрузки данных', 'error');
-          renderTable([], namesMap);
+          currentRows = [];
+          renderTable([]);
           return;
         }
         const data = await r.json();
-        const rows = data.rows || [];
-        rows.forEach(row => {
+        currentRows = data.rows || [];
+        currentRows.forEach(row => {
           row.name = namesMap[row.instrument_id] || row.instrument_id;
         });
-        const nameByFigi = {};
-        rows.forEach(row => { nameByFigi[row.instrument_id] = row.name; });
-        renderTable(rows, nameByFigi);
+        renderTable(currentRows);
         updateLastUpdate();
       } finally {
         setLoading(false);
@@ -487,7 +579,7 @@
       if (autoRefreshEnabled) {
         btn.textContent = 'Авто: ВКЛ';
         btn.classList.add('active');
-        status.textContent = 'обновление каждые 5 сек';
+        status.textContent = 'обновление каждые 1 сек';
         status.classList.add('active');
         startAutoRefresh();
       } else {
@@ -513,6 +605,16 @@
       }
     }
 
+    function handleSort(col) {
+      if (sortColumn === col) {
+        sortDirection = sortDirection === 'asc' ? 'desc' : 'asc';
+      } else {
+        sortColumn = col;
+        sortDirection = col === 'name' ? 'asc' : 'desc';
+      }
+      renderTable(currentRows);
+    }
+
     // Event listeners
     document.getElementById('btnRefresh').addEventListener('click', loadTable);
     document.getElementById('btnSettings').addEventListener('click', toggleSettings);
@@ -531,6 +633,11 @@
       btn.addEventListener('click', () => setActiveCategory(btn.dataset.category));
     });
 
+    // Sort listeners
+    document.querySelectorAll('th[data-sort]').forEach(th => {
+      th.addEventListener('click', () => handleSort(th.dataset.sort));
+    });
+
     // Init
     (async function init() {
       setLoading(true);
@@ -540,12 +647,12 @@
           await loadTable();
           startAutoRefresh();
         } else {
-          renderTable([], namesMap);
-          showMsg('Откройте «Настройки» и выберите фьючерсы для отображения.', 'info');
+          renderTable([]);
+          showMsg('Откройте «Настройки» и выберите инструменты для отображения.', 'info');
         }
       } catch (e) {
         showMsg('Ошибка: ' + e.message, 'error');
-        renderTable([], namesMap);
+        renderTable([]);
       } finally {
         setLoading(false);
       }

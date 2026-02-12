@@ -18,7 +18,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ========== Кэширование ==========
 # TTL в секундах
 CACHE_TTL_FUTURES = 300  # 5 минут - список фьючерсов редко меняется
-CACHE_TTL_CANDLES = 30   # 30 секунд - свечи нужны свежие, но не каждый запрос
+CACHE_TTL_CANDLES = 5    # 5 секунд - для обновления раз в секунду
 
 _cache = {}
 _cache_lock = threading.Lock()
@@ -174,18 +174,32 @@ def _fetch_candles_for_instrument(instrument_id, base_url, headers, from_ts, to_
                 "change_pct": None,
                 "error": "no data",
             }
-        else:
-            last = candles[-1]
-            open_price = _quotation_to_float(last.get("open"))
-            close_price = _quotation_to_float(last.get("close"))
-            change_pct = None
-            if open_price and open_price != 0:
-                change_pct = round((close_price - open_price) / open_price * 100, 2)
+        elif len(candles) < 2:
+            # Только одна свеча (сегодняшняя) - нет вчерашних данных
+            today = candles[-1]
+            open_price = _quotation_to_float(today.get("open"))
+            close_price = _quotation_to_float(today.get("close"))
             result = {
                 "instrument_id": instrument_id,
                 "name": instrument_id,
                 "close": round(close_price, 4) if close_price else None,
                 "open": round(open_price, 4) if open_price else None,
+                "change_pct": None,
+            }
+        else:
+            # Вчерашняя свеча (предпоследняя) и сегодняшняя (последняя)
+            yesterday = candles[-2]
+            today = candles[-1]
+            yesterday_close = _quotation_to_float(yesterday.get("close"))
+            today_open = _quotation_to_float(today.get("open"))
+            change_pct = None
+            if yesterday_close and yesterday_close != 0:
+                change_pct = round((today_open - yesterday_close) / yesterday_close * 100, 2)
+            result = {
+                "instrument_id": instrument_id,
+                "name": instrument_id,
+                "close": round(yesterday_close, 4) if yesterday_close else None,
+                "open": round(today_open, 4) if today_open else None,
                 "change_pct": change_pct,
             }
         
