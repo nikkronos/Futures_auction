@@ -218,10 +218,11 @@
           <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
           <th class="num" data-sort="open">Цена открытия <span class="sort-icon"></span></th>
           <th class="num" data-sort="change">Изменение % <span class="sort-icon"></span></th>
+          <th class="num">Лоты</th>
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr><td colspan="4">Загрузка…</td></tr>
+        <tr><td colspan="5">Загрузка…</td></tr>
       </tbody>
     </table>
   </div>
@@ -515,7 +516,7 @@
     function renderTable(rows) {
       const tbody = document.getElementById('tableBody');
       if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="4">Выберите инструменты в настройках или данных пока нет.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="5">Выберите инструменты в настройках или данных пока нет.</td></tr>';
         return;
       }
       const sorted = sortRows(rows);
@@ -523,6 +524,7 @@
         const name = row.name || row.instrument_id;
         const close = formatPrice(row.close);
         const open = formatPrice(row.open);
+        const lots = row.total_lots != null ? row.total_lots : '—';
         let pct = '—';
         let pctClass = 'pct-null';
         if (row.change_pct != null) {
@@ -535,6 +537,7 @@
           '<td class="num">' + close + '</td>' +
           '<td class="num">' + open + '</td>' +
           '<td class="num ' + pctClass + '">' + pct + (row.change_pct != null ? '%' : '') + '</td>' +
+          '<td class="num">' + lots + '</td>' +
           '</tr>'
         );
       }).join('');
@@ -646,6 +649,7 @@
             <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
             <th class="num" data-sort="open">Цена открытия <span class="sort-icon"></span></th>
             <th class="num" data-sort="change">Изменение % <span class="sort-icon"></span></th>
+            <th class="num">Лоты</th>
           </tr>
         `;
         // Re-attach sort listeners

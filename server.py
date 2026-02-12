@@ -248,8 +248,8 @@ def _fetch_candles_for_instrument(instrument_id, base_url, headers, from_ts, to_
 
 @app.route("/api/table")
 def api_table():
-    """Данные для таблицы: по списку instrument_id — последняя дневная свеча (open, close).
-    Свечи кэшируются на 30 секунд для каждого инструмента."""
+    """Данные для таблицы: по списку instrument_id — последняя дневная свеча (open, close) + лоты из стакана.
+    Свечи кэшируются на 10 секунд для каждого инструмента."""
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
         return jsonify({"error": "TINKOFF_INVEST_TOKEN not set"}), 503
@@ -272,6 +272,9 @@ def api_table():
         result, is_cached = _fetch_candles_for_instrument(
             instrument_id, base_url, headers, from_ts, to_ts
         )
+        # Добавляем лоты из стакана
+        orderbook, _ = _fetch_orderbook(instrument_id, base_url, headers, depth=1)
+        result["total_lots"] = orderbook.get("total_lots")
         rows.append(result)
         if is_cached:
             cached_count += 1
