@@ -104,9 +104,13 @@ def index():
     return send_from_directory(app.static_folder, "index.html")
 
 
+# Список акций (спот), которые нужно показывать
+SPOT_TICKERS = ["PLZL", "SBER", "LKOH", "GAZP", "NVTK", "VTBR", "GMKN"]
+
+
 @app.route("/api/futures")
 def api_futures():
-    """Список фьючерсов + акций (спот) для настроек. Кэшируется на 5 минут."""
+    """Список фьючерсов + избранных акций (спот) для настроек. Кэшируется на 5 минут."""
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
         logger.warning("TINKOFF_INVEST_TOKEN not set")
@@ -141,23 +145,27 @@ def api_futures():
     except Exception as e:
         logger.exception("Error loading futures: %s", e)
 
-    # 2. Загружаем акции (спот)
+    # 2. Загружаем только избранные акции (спот)
     try:
         url = f"{base_url}/tinkoff.public.invest.api.contract.v1.InstrumentsService/Shares"
         resp = requests.post(url, headers=headers, json={}, timeout=30, verify=False)
         resp.raise_for_status()
         data = resp.json()
         shares_count = 0
+        spot_tickers_upper = [t.upper() for t in SPOT_TICKERS]
         for inv in data.get("instruments", []):
-            items.append({
-                "figi": inv.get("figi", ""),
-                "ticker": inv.get("ticker", ""),
-                "name": inv.get("name") or inv.get("ticker", ""),
-                "instrument_uid": inv.get("uid", "") or inv.get("figi", ""),
-                "instrument_type": "shares",
-            })
-            shares_count += 1
-        logger.info("shares count=%s", shares_count)
+            ticker = inv.get("ticker", "")
+            # Только акции из списка SPOT_TICKERS
+            if ticker.upper() in spot_tickers_upper:
+                items.append({
+                    "figi": inv.get("figi", ""),
+                    "ticker": ticker,
+                    "name": inv.get("name") or ticker,
+                    "instrument_uid": inv.get("uid", "") or inv.get("figi", ""),
+                    "instrument_type": "shares",
+                })
+                shares_count += 1
+        logger.info("shares (spot) count=%s", shares_count)
     except Exception as e:
         logger.exception("Error loading shares: %s", e)
 

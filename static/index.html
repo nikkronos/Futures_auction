@@ -180,7 +180,6 @@
       <button type="button" class="category-btn" data-category="commodities">Товары</button>
       <button type="button" class="category-btn" data-category="stocks">Акции (фьюч)</button>
       <button type="button" class="category-btn" data-category="shares">Спот</button>
-      <button type="button" class="category-btn" data-category="other">Другое</button>
     </div>
     <div class="settings-list" id="settingsList"></div>
     <div style="margin-top: 0.75rem;">
@@ -218,40 +217,50 @@
     let sortColumn = 'name';
     let sortDirection = 'asc';
 
-    // Тикеры акций — всегда относятся к категории stocks (исключения из других категорий)
+    // Тикеры фьючерсов на акции (коды фьючерсов отличаются от акций!)
     const STOCK_TICKERS = [
-      'PLZL', 'POLY',  // Полюс, Полиметалл — не металлы
-      'LEAS', 'EUTR',  // Европлан — не валюта
-      'TATN', 'TATNP', // Татнефть, Татнефть-п
-      'TRNF', 'TRNFP', // Транснефть
-      'SNGS', 'SNGSP', // Сургутнефтегаз
-      'GAZP',          // Газпром
-      'SIBN',          // Газпромнефть
-      'BANE', 'BANEP', // Башнефть
-      'RNFT',          // Русснефть
-      'ROSN',          // Роснефть
-      'LKOH',          // Лукойл
-      'SBER', 'SBERP', // Сбербанк
-      'VTBR',          // ВТБ
-      'GMKN',          // Норникель
-      'NVTK',          // Новатэк
-      'YNDX',          // Яндекс
-      'MTSS',          // МТС
-      'MAGN',          // ММК
-      'NLMK',          // НЛМК
-      'CHMF',          // Северсталь
-      'ALRS',          // АЛРОСА
-      'AFLT',          // Аэрофлот
-      'MOEX',          // Мосбиржа
-      'TCSG',          // Тинькофф
-      'RUAL',          // РУСАЛ
-      'PIKK',          // ПИК
-      'MGNT',          // Магнит
-      'PHOR',          // Фосагро
-      'FEES',          // ФСК
-      'HYDR',          // РусГидро
-      'IRAO',          // Интер РАО
-      'RTKM', 'RTKMP', // Ростелеком
+      // Фьючерсные коды
+      'SR', 'SBRF',    // Сбербанк
+      'GZ', 'GAZR',    // Газпром
+      'LK', 'LKOH',    // Лукойл
+      'RN', 'ROSN',    // Роснефть
+      'VB', 'VTBR',    // ВТБ
+      'GM', 'GMKN',    // Норникель
+      'NK', 'NVTK',    // Новатэк
+      'PZ', 'PLZL',    // Полюс
+      'TT', 'TATN',    // Татнефть
+      'TN', 'TRNF',    // Транснефть
+      'SN', 'SNGS',    // Сургутнефтегаз
+      'SP', 'SNGSP',   // Сургут-п
+      'BN', 'BANE',    // Башнефть
+      'SG', 'SIBN',    // Газпромнефть
+      'RF', 'RNFT',    // Русснефть
+      'YN', 'YNDX',    // Яндекс
+      'MT', 'MTSS',    // МТС
+      'MG', 'MAGN',    // ММК
+      'NM', 'NLMK',    // НЛМК
+      'CH', 'CHMF',    // Северсталь
+      'AL', 'ALRS',    // АЛРОСА
+      'AF', 'AFLT',    // Аэрофлот
+      'ME', 'MOEX',    // Мосбиржа
+      'TC', 'TCSG',    // Тинькофф
+      'RL', 'RUAL',    // РУСАЛ
+      'PK', 'PIKK',    // ПИК
+      'MN', 'MGNT',    // Магнит
+      'PH', 'PHOR',    // Фосагро
+      'FS', 'FEES',    // ФСК
+      'HY', 'HYDR',    // РусГидро
+      'IR', 'IRAO',    // Интер РАО
+      'RT', 'RTKM',    // Ростелеком
+      'PL', 'POLY',    // Полиметалл
+      'LE', 'LEAS',    // Европлан
+      'FL', 'FLOT',    // Совкомфлот
+      'SV', 'SVCB',    // Совкомбанк
+      'OZ', 'OZON',    // Озон
+      'PO', 'POSI',    // Positive
+      'HH', 'HHRU',    // HeadHunter
+      'ML', 'MAIL',    // VK
+      'FV', 'FIVE',    // X5
     ];
 
     // Категоризация по тикеру/названию
@@ -317,11 +326,11 @@
     }
 
     function getCategoryCounts() {
-      const counts = { all: allFutures.length, metals: 0, crypto: 0, indices: 0, currencies: 0, commodities: 0, stocks: 0, shares: 0, other: 0 };
+      const counts = { all: allFutures.length, metals: 0, crypto: 0, indices: 0, currencies: 0, commodities: 0, stocks: 0, shares: 0 };
       allFutures.forEach(f => {
         const cat = detectCategory(f.ticker, f.name, f.instrument_type);
         if (counts[cat] !== undefined) counts[cat]++;
-        else counts.other++;
+        // "other" не показываем как отдельную категорию - они в "Все"
       });
       return counts;
     }
