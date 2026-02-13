@@ -180,7 +180,7 @@
     <button type="button" id="btnSettings">Настройки</button>
     <button type="button" id="btnMode">Режим: Свечи</button>
     <button type="button" id="btnAutoRefresh">Авто: ВКЛ</button>
-    <span class="auto-status active" id="autoStatus">обновление каждые 5 сек</span>
+    <span class="auto-status active" id="autoStatus">обновление каждые 30 мин</span>
     <span class="mode-indicator" id="modeIndicator"></span>
     <span id="auctionBadge"></span>
     <span class="last-update" id="lastUpdate"></span>
@@ -216,8 +216,8 @@
         <tr>
           <th data-sort="name">Актив <span class="sort-icon"></span></th>
           <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
-          <th class="num" data-sort="open">Цена открытия <span class="sort-icon"></span></th>
-          <th class="num" data-sort="change">Изменение % <span class="sort-icon"></span></th>
+          <th class="num" data-sort="open">Цена аукциона <span class="sort-icon"></span></th>
+          <th class="num" data-sort="change">Отклонение <span class="sort-icon"></span></th>
           <th class="num">Лоты</th>
         </tr>
       </thead>
@@ -230,7 +230,8 @@
   <script>
     const STORAGE_IDS = 'damir_futures_selected_ids';
     const STORAGE_NAMES = 'damir_futures_names';
-    const AUTO_REFRESH_INTERVAL = 5000; // 5 секунд
+    const AUTO_REFRESH_INTERVAL_AUCTION = 5000; // 5 секунд во время аукциона
+    const AUTO_REFRESH_INTERVAL_NORMAL = 30 * 60 * 1000; // 30 минут обычно
 
     let allFutures = [];
     let selectedIds = new Set(JSON.parse(localStorage.getItem(STORAGE_IDS) || '[]'));
@@ -486,12 +487,29 @@
             valB = b.close ?? -Infinity;
             break;
           case 'open':
-            valA = a.open ?? -Infinity;
-            valB = b.open ?? -Infinity;
+            valA = a.open ?? a.auction_price ?? -Infinity;
+            valB = b.open ?? b.auction_price ?? -Infinity;
             break;
           case 'change':
-            valA = a.change_pct ?? -Infinity;
-            valB = b.change_pct ?? -Infinity;
+          case 'deviation':
+            valA = a.change_pct ?? a.deviation_pct ?? -Infinity;
+            valB = b.change_pct ?? b.deviation_pct ?? -Infinity;
+            break;
+          case 'bid':
+            valA = a.total_bid_lots ?? -Infinity;
+            valB = b.total_bid_lots ?? -Infinity;
+            break;
+          case 'ask':
+            valA = a.total_ask_lots ?? -Infinity;
+            valB = b.total_ask_lots ?? -Infinity;
+            break;
+          case 'auction':
+            valA = a.auction_price ?? -Infinity;
+            valB = b.auction_price ?? -Infinity;
+            break;
+          case 'lots':
+            valA = a.total_lots ?? -Infinity;
+            valB = b.total_lots ?? -Infinity;
             break;
           default:
             return 0;
@@ -634,21 +652,26 @@
       if (viewMode === 'orderbook') {
         thead.innerHTML = `
           <tr>
-            <th>Актив</th>
-            <th class="num">Bid</th>
-            <th class="num">Ask</th>
-            <th class="num">Цена аукц.</th>
-            <th class="num">Откл. %</th>
-            <th class="num">Лоты</th>
+            <th data-sort="name">Актив <span class="sort-icon"></span></th>
+            <th class="num" data-sort="bid">Bid <span class="sort-icon"></span></th>
+            <th class="num" data-sort="ask">Ask <span class="sort-icon"></span></th>
+            <th class="num" data-sort="auction">Цена аукц. <span class="sort-icon"></span></th>
+            <th class="num" data-sort="deviation">Отклонение <span class="sort-icon"></span></th>
+            <th class="num" data-sort="lots">Лоты <span class="sort-icon"></span></th>
           </tr>
         `;
+        // Re-attach sort listeners
+        document.querySelectorAll('th[data-sort]').forEach(th => {
+          th.addEventListener('click', () => handleSort(th.dataset.sort));
+        });
+        updateSortIcons();
       } else {
         thead.innerHTML = `
           <tr>
             <th data-sort="name">Актив <span class="sort-icon"></span></th>
             <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
-            <th class="num" data-sort="open">Цена открытия <span class="sort-icon"></span></th>
-            <th class="num" data-sort="change">Изменение % <span class="sort-icon"></span></th>
+            <th class="num" data-sort="open">Цена аукциона <span class="sort-icon"></span></th>
+            <th class="num" data-sort="change">Отклонение <span class="sort-icon"></span></th>
             <th class="num">Лоты</th>
           </tr>
         `;
@@ -666,10 +689,12 @@
         tbody.innerHTML = '<tr><td colspan="6">Нет данных стакана.</td></tr>';
         return;
       }
-      tbody.innerHTML = rows.map(row => {
+      const sorted = sortRows(rows);
+      tbody.innerHTML = sorted.map(row => {
         const name = row.name || row.instrument_id;
-        const bid = row.best_bid != null ? formatPrice(row.best_bid) : '—';
-        const ask = row.best_ask != null ? formatPrice(row.best_ask) : '—';
+        // Bid и Ask - общее количество контрактов (не цены!)
+        const bid = row.total_bid_lots != null ? row.total_bid_lots : '—';
+        const ask = row.total_ask_lots != null ? row.total_ask_lots : '—';
         const auctionPrice = row.auction_price != null ? formatPrice(row.auction_price) : '—';
         let devPct = '—';
         let devClass = 'pct-null';
@@ -677,6 +702,7 @@
           devPct = row.deviation_pct > 0 ? '+' + row.deviation_pct : String(row.deviation_pct);
           devClass = row.deviation_pct > 0 ? 'pct-positive' : row.deviation_pct < 0 ? 'pct-negative' : 'pct-null';
         }
+        // Лоты - количество лотов, которые пройдут по цене аукциона
         const lots = row.total_lots != null ? row.total_lots : '—';
         return (
           '<tr>' +
@@ -689,6 +715,7 @@
           '</tr>'
         );
       }).join('');
+      updateSortIcons();
     }
 
     function toggleMode() {
@@ -756,8 +783,8 @@
       if (autoRefreshEnabled) {
         btn.textContent = 'Авто: ВКЛ';
         btn.classList.add('active');
-        status.textContent = 'обновление каждые 5 сек';
         status.classList.add('active');
+        updateAutoStatusText();
         startAutoRefresh();
       } else {
         btn.textContent = 'Авто: ВЫКЛ';
@@ -768,10 +795,64 @@
       }
     }
 
+    function getRefreshInterval() {
+      // Проверяем время аукциона (за 5 минут до и 5 минут после)
+      const now = new Date();
+      const mskTime = new Date(now.getTime() + (3 * 60 * 60 * 1000)); // UTC+3
+      const hour = mskTime.getHours();
+      const minute = mskTime.getMinutes();
+      const weekday = mskTime.getDay(); // 0=воскресенье, 1=понедельник...
+      const timeMinutes = hour * 60 + minute;
+      
+      // Аукцион открытия: Пн-Пт 8:50-9:00, Сб-Вс 9:50-10:00
+      // За 5 минут до и 5 минут после = Пн-Пт 8:45-9:05, Сб-Вс 9:45-10:05
+      let openingStart, openingEnd;
+      if (weekday >= 1 && weekday <= 5) { // Пн-Пт
+        openingStart = 8 * 60 + 45; // 8:45
+        openingEnd = 9 * 60 + 5; // 9:05
+      } else { // Сб-Вс
+        openingStart = 9 * 60 + 45; // 9:45
+        openingEnd = 10 * 60 + 5; // 10:05
+      }
+      
+      // Аукцион закрытия: 18:40-18:50 каждый день
+      // За 5 минут до и 5 минут после = 18:35-18:55
+      const closingStart = 18 * 60 + 35; // 18:35
+      const closingEnd = 18 * 60 + 55; // 18:55
+      
+      const isAuctionTime = 
+        (timeMinutes >= openingStart && timeMinutes <= openingEnd) ||
+        (timeMinutes >= closingStart && timeMinutes <= closingEnd);
+      
+      return isAuctionTime ? AUTO_REFRESH_INTERVAL_AUCTION : AUTO_REFRESH_INTERVAL_NORMAL;
+    }
+    
+    function updateAutoStatusText() {
+      const status = document.getElementById('autoStatus');
+      const interval = getRefreshInterval();
+      if (interval === AUTO_REFRESH_INTERVAL_AUCTION) {
+        status.textContent = 'обновление каждые 5 сек (аукцион)';
+      } else {
+        status.textContent = 'обновление каждые 30 мин';
+      }
+    }
+
     function startAutoRefresh() {
       stopAutoRefresh();
       if (autoRefreshEnabled && selectedIds.size > 0) {
-        autoRefreshTimer = setInterval(loadData, AUTO_REFRESH_INTERVAL);
+        const refresh = () => {
+          loadData();
+          updateAutoStatusText();
+          // Перезапускаем с новым интервалом
+          stopAutoRefresh();
+          const interval = getRefreshInterval();
+          autoRefreshTimer = setTimeout(() => {
+            startAutoRefresh();
+          }, interval);
+        };
+        const interval = getRefreshInterval();
+        autoRefreshTimer = setTimeout(refresh, interval);
+        updateAutoStatusText();
       }
     }
 
@@ -821,6 +902,7 @@
       setLoading(true);
       try {
         await loadFutures();
+        updateAutoStatusText();
         if (selectedIds.size > 0) {
           await loadData();
           startAutoRefresh();

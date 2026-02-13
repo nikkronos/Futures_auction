@@ -248,7 +248,7 @@ def _fetch_candles_for_instrument(instrument_id, base_url, headers, from_ts, to_
 
 @app.route("/api/table")
 def api_table():
-    """Данные для таблицы: по списку instrument_id — последняя дневная свеча (open, close) + лоты из стакана.
+    """Данные для таблицы: по списку instrument_id — последняя дневная свеча (close) + цена аукциона + отклонение + лоты.
     Свечи кэшируются на 10 секунд для каждого инструмента."""
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
@@ -272,9 +272,24 @@ def api_table():
         result, is_cached = _fetch_candles_for_instrument(
             instrument_id, base_url, headers, from_ts, to_ts
         )
-        # Добавляем лоты из стакана
-        orderbook, _ = _fetch_orderbook(instrument_id, base_url, headers, depth=1)
-        result["total_lots"] = orderbook.get("total_lots")
+        # Получаем данные стакана для цены аукциона и лотов
+        orderbook, _ = _fetch_orderbook(instrument_id, base_url, headers, depth=10)
+        
+        # Заменяем цену открытия на цену аукциона
+        result["auction_price"] = orderbook.get("auction_price")
+        result["open"] = orderbook.get("auction_price")  # Для совместимости
+        
+        # Пересчитываем отклонение от цены закрытия до цены аукциона
+        close_price = result.get("close")
+        auction_price = result.get("auction_price")
+        if close_price and auction_price and close_price != 0:
+            result["change_pct"] = round((auction_price - close_price) / close_price * 100, 2)
+        else:
+            result["change_pct"] = None
+        
+        # Добавляем лоты (количество лотов, которые пройдут по цене аукциона)
+        result["total_lots"] = orderbook.get("total_lots") or orderbook.get("auction_lots")
+        
         rows.append(result)
         if is_cached:
             cached_count += 1
@@ -318,6 +333,44 @@ def _is_auction_time():
     }
 
 
+def _calculate_auction_price(bids, asks):
+    """Рассчитать цену аукциона - цену, по которой пройдёт максимальное количество лотов.
+    Ищем пересечение bid и ask заявок."""
+    if not bids or not asks:
+        return None, 0
+    
+    # Сортируем bids по убыванию цены, asks по возрастанию
+    sorted_bids = sorted([(_quotation_to_float(b.get("price")), int(b.get("quantity", 0))) 
+                         for b in bids], reverse=True)
+    sorted_asks = sorted([(_quotation_to_float(a.get("price")), int(a.get("quantity", 0))) 
+                         for a in asks])
+    
+    # Находим цену пересечения (где bid >= ask)
+    best_price = None
+    max_lots = 0
+    
+    for bid_price, bid_qty in sorted_bids:
+        for ask_price, ask_qty in sorted_asks:
+            if bid_price >= ask_price:
+                # Пересечение найдено - считаем сколько лотов пройдёт
+                lots = min(bid_qty, ask_qty)
+                if lots > max_lots:
+                    max_lots = lots
+                    # Цена аукциона - средняя между bid и ask в точке пересечения
+                    best_price = (bid_price + ask_price) / 2
+            else:
+                break  # bid_price < ask_price, дальше не будет пересечений
+    
+    # Если пересечений нет, используем среднюю между лучшими bid и ask
+    if best_price is None and sorted_bids and sorted_asks:
+        best_bid_price = sorted_bids[0][0]
+        best_ask_price = sorted_asks[0][0]
+        if best_bid_price and best_ask_price:
+            best_price = (best_bid_price + best_ask_price) / 2
+    
+    return round(best_price, 4) if best_price else None, max_lots
+
+
 def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
     """Получить стакан для инструмента."""
     cache_key = f"orderbook_{instrument_id}"
@@ -345,20 +398,17 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
         total_bid_lots = sum(int(b.get("quantity", 0)) for b in bids)
         total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
         
-        # Приблизительная цена аукциона (середина спреда)
-        auction_price = None
-        if best_bid and best_ask:
-            auction_price = round((best_bid + best_ask) / 2, 4)
+        # Рассчитываем цену аукциона и количество лотов, которые пройдут
+        auction_price, auction_lots = _calculate_auction_price(bids, asks)
         
-        # Последняя цена
+        # Последняя цена и цена закрытия
         last_price = _quotation_to_float(data.get("lastPrice"))
         close_price = _quotation_to_float(data.get("closePrice"))
         
-        # Отклонение от последней цены
+        # Отклонение от цены закрытия до цены аукциона
         deviation_pct = None
-        reference_price = last_price or close_price
-        if auction_price and reference_price and reference_price != 0:
-            deviation_pct = round((auction_price - reference_price) / reference_price * 100, 2)
+        if auction_price and close_price and close_price != 0:
+            deviation_pct = round((auction_price - close_price) / close_price * 100, 2)
         
         result = {
             "instrument_id": instrument_id,
@@ -366,15 +416,15 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
             "best_ask": round(best_ask, 4) if best_ask else None,
             "spread": round(best_ask - best_bid, 4) if (best_bid and best_ask) else None,
             "auction_price": auction_price,
+            "auction_lots": auction_lots,  # Количество лотов, которые пройдут по цене аукциона
             "last_price": round(last_price, 4) if last_price else None,
             "close_price": round(close_price, 4) if close_price else None,
             "deviation_pct": deviation_pct,
-            "total_bid_lots": total_bid_lots,
-            "total_ask_lots": total_ask_lots,
-            "total_lots": total_bid_lots + total_ask_lots,
+            "total_bid_lots": total_bid_lots,  # Общее количество контрактов на покупку
+            "total_ask_lots": total_ask_lots,  # Общее количество контрактов на продажу
+            "total_lots": auction_lots,  # Лоты, которые пройдут по цене аукциона
         }
         
-        # Кэш на 1 секунду для стакана
         # Кэш на 5 секунд для стакана
         _cache_set(cache_key, result, 5)
         return result, False
