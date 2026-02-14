@@ -368,7 +368,8 @@ def _calculate_auction_price(bids, asks):
         if best_bid_price and best_ask_price:
             best_price = (best_bid_price + best_ask_price) / 2
     
-    return round(best_price, 4) if best_price else None, max_lots
+    # Округляем до 2 знаков (копейки) для рублёвых инструментов
+    return round(best_price, 2) if best_price else None, max_lots
 
 
 def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
@@ -394,7 +395,7 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
         best_bid = _quotation_to_float(bids[0].get("price")) if bids else None
         best_ask = _quotation_to_float(asks[0].get("price")) if asks else None
         
-        # Суммарный объём заявок
+        # Суммарный объём заявок (API может отдавать только видимую часть айсбергов)
         total_bid_lots = sum(int(b.get("quantity", 0)) for b in bids)
         total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
         
@@ -415,7 +416,7 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
             "best_bid": round(best_bid, 4) if best_bid else None,
             "best_ask": round(best_ask, 4) if best_ask else None,
             "spread": round(best_ask - best_bid, 4) if (best_bid and best_ask) else None,
-            "auction_price": auction_price,
+            "auction_price": round(auction_price, 2) if auction_price else None,
             "auction_lots": auction_lots,  # Количество лотов, которые пройдут по цене аукциона
             "last_price": round(last_price, 4) if last_price else None,
             "close_price": round(close_price, 4) if close_price else None,
@@ -438,7 +439,7 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
 
 @app.route("/api/orderbook")
 def api_orderbook():
-    """Данные стакана для аукциона."""
+    """Данные стакана для аукциона. Отклонение считается от вчерашней цены закрытия (как в режиме свечей)."""
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
         return jsonify({"error": "TINKOFF_INVEST_TOKEN not set"}), 503
@@ -451,10 +452,23 @@ def api_orderbook():
     
     base_url = _get_api_url()
     headers = _get_headers()
+    to_ts = datetime.now(timezone.utc)
+    from_ts = to_ts - timedelta(days=7)
     
     rows = []
     for instrument_id in instrument_ids:
         result, _ = _fetch_orderbook(instrument_id, base_url, headers)
+        # Отклонение — от вчерашней цены закрытия (из свечей), как в режиме «Свечи»
+        candle_result, _ = _fetch_candles_for_instrument(
+            instrument_id, base_url, headers, from_ts, to_ts
+        )
+        yesterday_close = candle_result.get("close")
+        auction_price = result.get("auction_price")
+        if yesterday_close and auction_price and yesterday_close != 0:
+            result["deviation_pct"] = round(
+                (auction_price - yesterday_close) / yesterday_close * 100, 2
+            )
+            result["close_price"] = round(yesterday_close, 4)
         rows.append(result)
     
     auction_info = _is_auction_time()

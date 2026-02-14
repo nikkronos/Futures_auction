@@ -398,13 +398,12 @@
 
     function formatPrice(value) {
       if (value == null) return '—';
-      if (Math.abs(value) >= 1000) {
-        return value.toFixed(2).replace(/\.?0+$/, '');
-      } else if (Math.abs(value) >= 1) {
-        return value.toFixed(4).replace(/\.?0+$/, '');
-      } else {
-        return value.toFixed(6).replace(/\.?0+$/, '');
+      // Цены в рублях — 2 знака (копейки)
+      if (Math.abs(value) >= 1) {
+        return value.toFixed(2).replace(/\.?0+$/, '') || value.toFixed(2);
       }
+      return value.toFixed(4).replace(/\.?0+$/, '') || value.toFixed(4);
+    }
     }
 
     async function loadFutures() {
@@ -796,31 +795,35 @@
     }
 
     function getRefreshInterval() {
-      // Проверяем время аукциона (за 5 минут до и 5 минут после)
+      // Московское время (UTC+3) — считаем из UTC, не из локального времени браузера
       const now = new Date();
-      const mskTime = new Date(now.getTime() + (3 * 60 * 60 * 1000)); // UTC+3
-      const hour = mskTime.getHours();
-      const minute = mskTime.getMinutes();
-      const weekday = mskTime.getDay(); // 0=воскресенье, 1=понедельник...
-      const timeMinutes = hour * 60 + minute;
+      const utcHour = now.getUTCHours();
+      const utcMinute = now.getUTCMinutes();
+      const mskTotalMin = (utcHour + 3) * 60 + utcMinute;
+      const mskMinOfDay = mskTotalMin % (24 * 60);
+      const mskHour = Math.floor(mskMinOfDay / 60);
+      const mskMinute = mskMinOfDay % 60;
+      const timeMinutes = mskHour * 60 + mskMinute;
+      // День недели в Москве (0=вс, 1=пн, ..., 6=сб)
+      const mskDayOffset = (utcHour + 3) >= 24 ? 1 : 0;
+      const weekday = (now.getUTCDay() + mskDayOffset) % 7;
       
       // Аукцион открытия: Пн-Пт 8:50-9:00, Сб-Вс 9:50-10:00
       // За 5 минут до и 5 минут после = Пн-Пт 8:45-9:05, Сб-Вс 9:45-10:05
       let openingStart, openingEnd;
       if (weekday >= 1 && weekday <= 5) { // Пн-Пт
         openingStart = 8 * 60 + 45; // 8:45
-        openingEnd = 9 * 60 + 5; // 9:05
+        openingEnd = 9 * 60 + 5;   // 9:05
       } else { // Сб-Вс
-        openingStart = 9 * 60 + 45; // 9:45
-        openingEnd = 10 * 60 + 5; // 10:05
+        openingStart = 9 * 60 + 45;  // 9:45
+        openingEnd = 10 * 60 + 5;   // 10:05
       }
       
-      // Аукцион закрытия: 18:40-18:50 каждый день
-      // За 5 минут до и 5 минут после = 18:35-18:55
-      const closingStart = 18 * 60 + 35; // 18:35
-      const closingEnd = 18 * 60 + 55; // 18:55
+      // Аукцион закрытия: 18:40-18:50 каждый день; окно 18:35-18:55
+      const closingStart = 18 * 60 + 35;
+      const closingEnd = 18 * 60 + 55;
       
-      const isAuctionTime = 
+      const isAuctionTime =
         (timeMinutes >= openingStart && timeMinutes <= openingEnd) ||
         (timeMinutes >= closingStart && timeMinutes <= closingEnd);
       
@@ -840,19 +843,16 @@
     function startAutoRefresh() {
       stopAutoRefresh();
       if (autoRefreshEnabled && selectedIds.size > 0) {
-        const refresh = () => {
-          loadData();
-          updateAutoStatusText();
-          // Перезапускаем с новым интервалом
-          stopAutoRefresh();
+        const scheduleNext = () => {
           const interval = getRefreshInterval();
+          updateAutoStatusText();
           autoRefreshTimer = setTimeout(() => {
-            startAutoRefresh();
+            loadData();
+            scheduleNext(); // каждый раз пересчитываем интервал (чтобы вовремя перейти на 5 сек в аукцион)
           }, interval);
         };
-        const interval = getRefreshInterval();
-        autoRefreshTimer = setTimeout(refresh, interval);
-        updateAutoStatusText();
+        loadData(); // первое обновление сразу
+        scheduleNext();
       }
     }
 
