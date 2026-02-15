@@ -919,25 +919,26 @@
       th.addEventListener('click', () => handleSort(th.dataset.sort));
     });
 
-    // Init: загрузка списка инструментов блокирует, данные таблицы — в фоне, чтобы кнопки работали сразу
-    (async function init() {
-      setLoading(true);
-      try {
-        await loadFutures();
-        updateAutoStatusText();
-        if (selectedIds.size > 0) {
-          setLoading(false); // снимаем блокировку сразу — кнопки работают
-          loadData(true).then(() => startAutoRefresh()); // данные подгружаются в фоне без блокировки
-        } else {
-          renderTable([]);
-          showMsg('Откройте «Настройки» и выберите инструменты для отображения.', 'info');
-          setLoading(false);
-        }
-      } catch (e) {
-        showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Обновите страницу (Ctrl+F5).' : ('Ошибка: ' + (e.message || e)), 'error');
-        renderTable([]);
-        setLoading(false);
-      }
+    // Init: ничего не блокируем — кнопки работают сразу, всё грузится в фоне (в т.ч. при закрытом рынке)
+    (function init() {
+      setLoading(false);
+      updateAutoStatusText();
+      renderTable([]); // сразу пустая таблица или «Загрузка…» в одной ячейке
+      loadFutures()
+        .then(() => {
+          updateAutoStatusText();
+          if (document.getElementById('settingsPanel').style.display !== 'none') {
+            renderSettings();
+          }
+          if (selectedIds.size > 0) {
+            loadData(true).then(() => startAutoRefresh());
+          } else {
+            showMsg('Откройте «Настройки» и выберите инструменты для отображения.', 'info');
+          }
+        })
+        .catch((e) => {
+          showMsg(e.name === 'AbortError' ? 'Таймаут загрузки списка. Рынок может быть закрыт.' : ('Ошибка: ' + (e.message || e)), 'error');
+        });
     })();
   </script>
 </body>
