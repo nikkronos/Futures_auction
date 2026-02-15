@@ -390,6 +390,12 @@
       document.body.classList.toggle('loading', loading);
     }
 
+    function fetchWithTimeout(url, ms) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), ms);
+      return fetch(url, { signal: ctrl.signal }).finally(() => clearTimeout(t));
+    }
+
     function updateLastUpdate() {
       const el = document.getElementById('lastUpdate');
       const now = new Date();
@@ -407,7 +413,7 @@
     }
 
     async function loadFutures() {
-      const r = await fetch('/api/futures');
+      const r = await fetchWithTimeout('/api/futures', 15000);
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         showMsg(err.error || 'Ошибка загрузки списка инструментов', 'error');
@@ -577,7 +583,7 @@
       setLoading(true);
       showMsg('');
       try {
-        const r = await fetch('/api/table?ids=' + encodeURIComponent(ids.join(',')));
+        const r = await fetchWithTimeout('/api/table?ids=' + encodeURIComponent(ids.join(',')), 45000);
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showMsg(err.error || 'Ошибка загрузки данных', 'error');
@@ -592,6 +598,10 @@
         });
         renderTable(currentRows);
         updateLastUpdate();
+      } catch (e) {
+        showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Выберите меньше инструментов в настройках.' : ('Ошибка: ' + (e.message || e)), 'error');
+        currentRows = [];
+        renderTable([]);
       } finally {
         setLoading(false);
       }
@@ -607,7 +617,7 @@
       setLoading(true);
       showMsg('');
       try {
-        const r = await fetch('/api/orderbook?ids=' + encodeURIComponent(ids.join(',')));
+        const r = await fetchWithTimeout('/api/orderbook?ids=' + encodeURIComponent(ids.join(',')), 45000);
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
           showMsg(err.error || 'Ошибка загрузки стакана', 'error');
@@ -624,6 +634,10 @@
         renderOrderbookTable(currentRows);
         updateAuctionBadge();
         updateLastUpdate();
+      } catch (e) {
+        showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Выберите меньше инструментов в настройках.' : ('Ошибка: ' + (e.message || e)), 'error');
+        currentRows = [];
+        renderOrderbookTable([]);
       } finally {
         setLoading(false);
       }
