@@ -186,7 +186,7 @@
   <h1>Таблица инструментов — Т-Инвестиции <small style="color:var(--muted);font-size:0.7em">v3</small></h1>
   <div class="toolbar">
     <button type="button" id="btnRefresh" onclick="location.reload()">Обновить</button>
-    <button type="button" id="btnSettings" onclick="var p=document.getElementById('settingsPanel');if(p)p.style.display=p.style.display==='none'?'block':'none';if(typeof renderSettings==='function')renderSettings();">Настройки</button>
+    <button type="button" id="btnSettings" onclick="var p=document.getElementById('settingsPanel');if(p){p.style.display=p.style.display==='none'?'block':'none';if(p.style.display!=='none'){var list=document.getElementById('settingsList');if(list&&list.children.length===0&&typeof loadFutures==='function'){list.innerHTML='Загрузка списка...';loadFutures().then(function(){if(typeof renderSettings==='function')renderSettings();}).catch(function(){if(list)list.innerHTML='Ошибка загрузки. Нажмите Обновить.';});}else if(typeof renderSettings==='function')renderSettings();}}">Настройки</button>
     <button type="button" id="btnMode" onclick="if(typeof toggleMode==='function')toggleMode()">Режим: Свечи</button>
     <button type="button" id="btnAutoRefresh" onclick="if(typeof toggleAutoRefresh==='function')toggleAutoRefresh()">Авто: ВКЛ</button>
     <span class="auto-status active" id="autoStatus">обновление каждые 30 мин</span>
