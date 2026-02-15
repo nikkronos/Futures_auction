@@ -573,8 +573,10 @@
       return div.innerHTML;
     }
 
+    const MAX_INSTRUMENTS_PER_REQUEST = 20; // чтобы запрос не зависал
+
     async function loadTable() {
-      const ids = Array.from(selectedIds).filter(Boolean);
+      const ids = Array.from(selectedIds).filter(Boolean).slice(0, MAX_INSTRUMENTS_PER_REQUEST);
       if (ids.length === 0) {
         currentRows = [];
         renderTable([]);
@@ -598,6 +600,9 @@
         });
         renderTable(currentRows);
         updateLastUpdate();
+        if (selectedIds.size > MAX_INSTRUMENTS_PER_REQUEST) {
+          showMsg('Показаны первые ' + MAX_INSTRUMENTS_PER_REQUEST + ' инструментов. Выберите меньше в настройках для быстрой загрузки.', 'info');
+        }
       } catch (e) {
         showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Выберите меньше инструментов в настройках.' : ('Ошибка: ' + (e.message || e)), 'error');
         currentRows = [];
@@ -608,7 +613,7 @@
     }
 
     async function loadOrderbook() {
-      const ids = Array.from(selectedIds).filter(Boolean);
+      const ids = Array.from(selectedIds).filter(Boolean).slice(0, MAX_INSTRUMENTS_PER_REQUEST);
       if (ids.length === 0) {
         currentRows = [];
         renderOrderbookTable([]);
@@ -634,6 +639,9 @@
         renderOrderbookTable(currentRows);
         updateAuctionBadge();
         updateLastUpdate();
+        if (selectedIds.size > MAX_INSTRUMENTS_PER_REQUEST) {
+          showMsg('Показаны первые ' + MAX_INSTRUMENTS_PER_REQUEST + ' инструментов.', 'info');
+        }
       } catch (e) {
         showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Выберите меньше инструментов в настройках.' : ('Ошибка: ' + (e.message || e)), 'error');
         currentRows = [];
@@ -925,7 +933,7 @@
           showMsg('Откройте «Настройки» и выберите инструменты для отображения.', 'info');
         }
       } catch (e) {
-        showMsg('Ошибка: ' + e.message, 'error');
+        showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Обновите страницу (Ctrl+F5).' : ('Ошибка: ' + (e.message || e)), 'error');
         renderTable([]);
       } finally {
         setLoading(false);
