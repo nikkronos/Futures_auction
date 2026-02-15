@@ -3,6 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
   <title>Виджет — Таблица инструментов | Т-Инвестиции</title>
   <style>
     :root {
@@ -174,7 +176,8 @@
   </style>
 </head>
 <body>
-  <h1>Таблица инструментов — Т-Инвестиции</h1>
+  <script>document.body.classList.remove('loading'); document.body.dataset.widgetVersion = '3';</script>
+  <h1>Таблица инструментов — Т-Инвестиции <small style="color:var(--muted);font-size:0.7em">v3</small></h1>
   <div class="toolbar">
     <button type="button" id="btnRefresh">Обновить</button>
     <button type="button" id="btnSettings">Настройки</button>
