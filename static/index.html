@@ -928,26 +928,28 @@
       th.addEventListener('click', () => handleSort(th.dataset.sort));
     });
 
-    // Init: ничего не блокируем — кнопки работают сразу, всё грузится в фоне (в т.ч. при закрытом рынке)
-    (function init() {
-      setLoading(false);
-      updateAutoStatusText();
-      renderTable([]); // сразу пустая таблица или «Загрузка…» в одной ячейке
-      loadFutures()
-        .then(() => {
-          updateAutoStatusText();
-          if (document.getElementById('settingsPanel').style.display !== 'none') {
-            renderSettings();
-          }
-          if (selectedIds.size > 0) {
-            loadData(true).then(() => startAutoRefresh());
-          } else {
-            showMsg('Откройте «Настройки» и выберите инструменты для отображения.', 'info');
-          }
-        })
-        .catch((e) => {
-          showMsg(e.name === 'AbortError' ? 'Таймаут загрузки списка. Рынок может быть закрыт.' : ('Ошибка: ' + (e.message || e)), 'error');
-        });
+    // Init: как раньше — ждём загрузку списка и данных, потом снимаем блокировку (к 7:00 при открытом рынке всё успеет)
+    (async function init() {
+      setLoading(true);
+      try {
+        await loadFutures();
+        updateAutoStatusText();
+        if (document.getElementById('settingsPanel').style.display !== 'none') {
+          renderSettings();
+        }
+        if (selectedIds.size > 0) {
+          await loadData();
+          startAutoRefresh();
+        } else {
+          renderTable([]);
+          showMsg('Откройте «Настройки» и выберите инструменты для отображения.', 'info');
+        }
+      } catch (e) {
+        showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Рынок может быть закрыт — попробуйте после 7:00.' : ('Ошибка: ' + (e.message || e)), 'error');
+        renderTable([]);
+      } finally {
+        setLoading(false);
+      }
     })();
   </script>
 </body>
