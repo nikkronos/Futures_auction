@@ -871,25 +871,41 @@
       }
     }
 
+    let lastRefreshInterval = 0;
+    
     function startAutoRefresh() {
       stopAutoRefresh();
       if (autoRefreshEnabled && selectedIds.size > 0) {
+        lastRefreshInterval = getRefreshInterval();
         const scheduleNext = () => {
           const interval = getRefreshInterval();
           updateAutoStatusText();
           autoRefreshTimer = setTimeout(() => {
-            loadData(true); // в фоне, без блокировки
+            loadData(true);
             scheduleNext();
           }, interval);
         };
-        loadData(true); // первое обновление в фоне
+        loadData(true);
         scheduleNext();
+        // Каждые 30 сек проверяем: вошли в аукцион — переключаемся на 5 сек
+        if (!window._auctionWatcher) {
+          window._auctionWatcher = setInterval(() => {
+            const iv = getRefreshInterval();
+            if (iv !== lastRefreshInterval) {
+              lastRefreshInterval = iv;
+              if (autoRefreshEnabled && selectedIds.size > 0) {
+                stopAutoRefresh();
+                startAutoRefresh();
+              }
+            }
+          }, 30000);
+        }
       }
     }
 
     function stopAutoRefresh() {
       if (autoRefreshTimer) {
-        clearInterval(autoRefreshTimer);
+        clearTimeout(autoRefreshTimer);
         autoRefreshTimer = null;
       }
     }
