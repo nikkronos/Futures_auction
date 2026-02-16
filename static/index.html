@@ -186,9 +186,9 @@
   <h1>Таблица инструментов — Т-Инвестиции <small style="color:var(--muted);font-size:0.7em">v3</small></h1>
   <div class="toolbar">
     <button type="button" id="btnRefresh" onclick="location.reload()">Обновить</button>
-    <button type="button" id="btnSettings" onclick="var p=document.getElementById('settingsPanel');if(p){p.style.display=p.style.display==='none'?'block':'none';if(p.style.display!=='none'){var list=document.getElementById('settingsList');if(list&&list.children.length===0&&typeof loadFutures==='function'){list.innerHTML='Загрузка списка...';loadFutures().then(function(){if(typeof renderSettings==='function')renderSettings();}).catch(function(){if(list)list.innerHTML='Ошибка загрузки. Нажмите Обновить.';});}else if(typeof renderSettings==='function')renderSettings();}}">Настройки</button>
-    <button type="button" id="btnMode" onclick="if(typeof toggleMode==='function')toggleMode()">Режим: Свечи</button>
-    <button type="button" id="btnAutoRefresh" onclick="if(typeof toggleAutoRefresh==='function')toggleAutoRefresh()">Авто: ВКЛ</button>
+    <button type="button" id="btnSettings" onclick="try{if(typeof toggleSettings==='function')toggleSettings();}catch(e){console.error('Settings',e);}">Настройки</button>
+    <button type="button" id="btnMode" onclick="try{if(typeof toggleMode==='function')toggleMode();}catch(e){console.error('Mode',e);}">Режим: Свечи</button>
+    <button type="button" id="btnAutoRefresh" onclick="try{if(typeof toggleAutoRefresh==='function')toggleAutoRefresh();}catch(e){console.error('Auto',e);}">Авто: ВКЛ</button>
     <span class="auto-status active" id="autoStatus">обновление каждые 30 мин</span>
     <span class="mode-indicator" id="modeIndicator"></span>
     <span id="auctionBadge"></span>
@@ -748,16 +748,17 @@
     }
 
     function toggleMode() {
-      viewMode = viewMode === 'candles' ? 'orderbook' : 'candles';
-      const btn = document.getElementById('btnMode');
-      btn.textContent = viewMode === 'candles' ? 'Режим: Свечи' : 'Режим: Стакан';
-      if (viewMode === 'orderbook') {
-        btn.classList.add('active');
-      } else {
-        btn.classList.remove('active');
-      }
-      updateTableHeader();
-      loadData();
+      try {
+        viewMode = viewMode === 'candles' ? 'orderbook' : 'candles';
+        const btn = document.getElementById('btnMode');
+        if (btn) {
+          btn.textContent = viewMode === 'candles' ? 'Режим: Свечи' : 'Режим: Стакан';
+          if (viewMode === 'orderbook') btn.classList.add('active');
+          else btn.classList.remove('active');
+        }
+        updateTableHeader();
+        loadData();
+      } catch (e) { console.error('toggleMode', e); }
     }
 
     function loadData(skipLoading) {
@@ -769,18 +770,25 @@
     }
 
     function toggleSettings() {
-      const panel = document.getElementById('settingsPanel');
-      const isVisible = panel.style.display !== 'none';
-      if (!isVisible && allFutures.length === 0) {
-        loadFutures().then(() => {
-          renderSettings();
-          panel.style.display = 'block';
-        });
-      } else {
-        if (allFutures.length) renderSettings();
-        document.getElementById('searchInput').value = '';
+      try {
+        const panel = document.getElementById('settingsPanel');
+        if (!panel) return;
+        const isVisible = panel.style.display !== 'none';
+        // Сначала переключаем видимость панели (синхронно), потом подгружаем список
         panel.style.display = isVisible ? 'none' : 'block';
-      }
+        if (panel.style.display === 'none') return;
+        const searchEl = document.getElementById('searchInput');
+        if (searchEl) searchEl.value = '';
+        if (allFutures.length === 0) {
+          const list = document.getElementById('settingsList');
+          if (list) list.innerHTML = 'Загрузка списка...';
+          loadFutures().then(() => { renderSettings(); }).catch(() => {
+            if (list) list.innerHTML = 'Ошибка загрузки. Нажмите Обновить.';
+          });
+        } else {
+          renderSettings();
+        }
+      } catch (e) { console.error('toggleSettings', e); }
     }
 
     function saveSettings() {
@@ -806,22 +814,27 @@
     }
 
     function toggleAutoRefresh() {
-      autoRefreshEnabled = !autoRefreshEnabled;
-      const btn = document.getElementById('btnAutoRefresh');
-      const status = document.getElementById('autoStatus');
-      if (autoRefreshEnabled) {
-        btn.textContent = 'Авто: ВКЛ';
-        btn.classList.add('active');
-        status.classList.add('active');
-        updateAutoStatusText();
-        startAutoRefresh();
-      } else {
-        btn.textContent = 'Авто: ВЫКЛ';
-        btn.classList.remove('active');
-        status.textContent = 'автообновление выключено';
-        status.classList.remove('active');
-        stopAutoRefresh();
-      }
+      try {
+        autoRefreshEnabled = !autoRefreshEnabled;
+        const btn = document.getElementById('btnAutoRefresh');
+        const status = document.getElementById('autoStatus');
+        if (btn) {
+          btn.textContent = autoRefreshEnabled ? 'Авто: ВКЛ' : 'Авто: ВЫКЛ';
+          if (autoRefreshEnabled) btn.classList.add('active');
+          else btn.classList.remove('active');
+        }
+        if (status) {
+          if (autoRefreshEnabled) {
+            status.classList.add('active');
+            updateAutoStatusText();
+          } else {
+            status.textContent = 'автообновление выключено';
+            status.classList.remove('active');
+          }
+        }
+        if (autoRefreshEnabled) startAutoRefresh();
+        else stopAutoRefresh();
+      } catch (e) { console.error('toggleAutoRefresh', e); }
     }
 
     function getRefreshInterval() {
@@ -919,10 +932,8 @@
       renderTable(currentRows);
     }
 
-    // Event listeners
+    // Event listeners (Настройки, Режим, Авто — только через onclick, чтобы не было двойного вызова)
     document.getElementById('btnRefresh').addEventListener('click', loadData);
-    document.getElementById('btnSettings').addEventListener('click', toggleSettings);
-    document.getElementById('btnMode').addEventListener('click', toggleMode);
     document.getElementById('btnSaveSettings').addEventListener('click', () => {
       saveSettings();
       startAutoRefresh();
@@ -930,7 +941,6 @@
     document.getElementById('btnSelectAll').addEventListener('click', selectAll);
     document.getElementById('btnSelectNone').addEventListener('click', selectNone);
     document.getElementById('btnSelectFiltered').addEventListener('click', selectFiltered);
-    document.getElementById('btnAutoRefresh').addEventListener('click', toggleAutoRefresh);
     document.getElementById('searchInput').addEventListener('input', filterSettings);
     
     // Category filter listeners
