@@ -419,7 +419,6 @@
       }
       return value.toFixed(4).replace(/\.?0+$/, '') || value.toFixed(4);
     }
-    }
 
     async function loadFutures() {
       const r = await fetchWithTimeout('/api/futures', 15000);
