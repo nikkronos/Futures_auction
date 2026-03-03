@@ -197,7 +197,7 @@
   </div>
   <div id="message"></div>
   <div id="settingsPanel" class="settings-panel" style="display: none;">
-    <h2>Выберите инструменты для отображения <small style="color:var(--muted);font-weight:normal;">(профиль: <span id="profileNameInSettings"></span>, лимит: <span id="limitInfo">18</span>)</small></h2>
+    <h2>Выберите инструменты для отображения <small style="color:var(--muted);font-weight:normal;">(профиль: <span id="profileNameInSettings"></span>, лимит: <span id="limitInfo">0/40</span>)</small></h2>
     <div id="limitWarning" class="msg error" style="display:none;margin-bottom:0.75rem;"></div>
     <div class="settings-toolbar">
       <input type="text" class="search-input" id="searchInput" placeholder="Поиск по названию или тикеру...">
@@ -253,9 +253,9 @@
     const CURRENT_PROFILE = getProfileFromUrl();
     const STORAGE_IDS = 'damir_futures_selected_ids_' + CURRENT_PROFILE;
     const STORAGE_NAMES = 'damir_futures_names'; // Общий для всех профилей
-    const AUTO_REFRESH_INTERVAL_AUCTION = 2000; // 2 секунды во время аукциона
+    const AUTO_REFRESH_INTERVAL_AUCTION = 4000; // 4 секунды во время аукциона
     const AUTO_REFRESH_INTERVAL_NORMAL = 60 * 60 * 1000; // 60 минут обычно
-    const MAX_INSTRUMENTS_LIMIT = 18; // Жёсткий лимит инструментов в одном запросе
+    const MAX_INSTRUMENTS_LIMIT = 40; // Жёсткий лимит инструментов в одном запросе
     
     // Уникальный ID сессии для статистики
     const SESSION_ID = 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
@@ -1028,7 +1028,7 @@
       const status = document.getElementById('autoStatus');
       const interval = getRefreshInterval();
       if (interval === AUTO_REFRESH_INTERVAL_AUCTION) {
-        status.textContent = 'обновление каждые 2 сек (аукцион)';
+        status.textContent = 'обновление каждые 4 сек (аукцион)';
       } else {
         status.textContent = 'обновление каждый час';
       }

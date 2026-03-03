@@ -23,10 +23,10 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 # ========== Конфигурация ==========
 # Лимиты T-Invest API: 600 запросов/мин на сервис котировок
-# При 2 сек интервале: 30 обновлений/мин × N инструментов ≤ 600 → N ≤ 20
-# С запасом: 18 инструментов
-MAX_CACHED_INSTRUMENTS = 18
-BACKGROUND_INTERVAL_AUCTION = 2      # 2 секунды во время аукциона
+# При 4 сек интервале: 15 обновлений/мин × N инструментов ≤ 600 → N ≈ 40
+# С небольшим запасом используем 40 инструментов
+MAX_CACHED_INSTRUMENTS = 40
+BACKGROUND_INTERVAL_AUCTION = 4      # 4 секунды во время аукциона
 BACKGROUND_INTERVAL_NORMAL = 3600    # 60 минут вне аукциона
 ACTIVE_INSTRUMENT_TTL = 300          # 5 минут - инструмент считается активным
 
@@ -964,7 +964,7 @@ def api_orderbook():
     Серверное кэширование v5:
     - Инструменты отмечаются как активные при запросе
     - Фоновый поток обновляет данные по активным инструментам
-    - Лимит: 18 инструментов (ограничение API)
+    - Лимит: 40 инструментов (ограничение API и интервал 4 сек)
     """
     session_id = request.args.get("session_id") or request.headers.get("X-Session-ID")
     _record_request("/api/orderbook", session_id)
