@@ -182,21 +182,23 @@
   </style>
 </head>
 <body>
-  <script>document.body.classList.remove('loading'); document.body.dataset.widgetVersion = '3';</script>
-  <h1>Таблица инструментов — Т-Инвестиции <small style="color:var(--muted);font-size:0.7em">v3</small></h1>
+  <script>document.body.classList.remove('loading'); document.body.dataset.widgetVersion = '5';</script>
+  <h1>Таблица инструментов — Т-Инвестиции <small style="color:var(--muted);font-size:0.7em">v5</small> <span id="profileBadge" style="font-size:0.6em;color:var(--accent);"></span></h1>
   <div class="toolbar">
     <button type="button" id="btnRefresh" onclick="location.reload()">Обновить</button>
     <button type="button" id="btnSettings" onclick="try{if(typeof toggleSettings==='function')toggleSettings();}catch(e){console.error('Settings',e);}">Настройки</button>
-    <button type="button" id="btnMode" onclick="try{if(typeof toggleMode==='function')toggleMode();}catch(e){console.error('Mode',e);}">Режим: Свечи</button>
     <button type="button" id="btnAutoRefresh" onclick="try{if(typeof toggleAutoRefresh==='function')toggleAutoRefresh();}catch(e){console.error('Auto',e);}">Авто: ВКЛ</button>
-    <span class="auto-status active" id="autoStatus">обновление каждые 30 мин</span>
+    <button type="button" id="btnNewProfile" onclick="try{if(typeof createNewProfile==='function')createNewProfile();}catch(e){console.error('Profile',e);}">+ Профиль</button>
+    <button type="button" id="btnCopyLink" onclick="try{if(typeof copyProfileLink==='function')copyProfileLink();}catch(e){console.error('Copy',e);}">Ссылка</button>
+    <span class="auto-status active" id="autoStatus">обновление каждый час</span>
     <span class="mode-indicator" id="modeIndicator"></span>
     <span id="auctionBadge"></span>
     <span class="last-update" id="lastUpdate"></span>
   </div>
   <div id="message"></div>
   <div id="settingsPanel" class="settings-panel" style="display: none;">
-    <h2>Выберите инструменты для отображения</h2>
+    <h2>Выберите инструменты для отображения <small style="color:var(--muted);font-weight:normal;">(профиль: <span id="profileNameInSettings"></span>, лимит: <span id="limitInfo">18</span>)</small></h2>
+    <div id="limitWarning" class="msg error" style="display:none;margin-bottom:0.75rem;"></div>
     <div class="settings-toolbar">
       <input type="text" class="search-input" id="searchInput" placeholder="Поиск по названию или тикеру...">
       <button type="button" id="btnSelectAll" onclick="document.querySelectorAll('#settingsList label:not(.hidden) input[type=checkbox]').forEach(function(cb){cb.checked=true}); if(typeof selectAll==='function')selectAll();">Все</button>
@@ -224,23 +226,39 @@
       <thead id="tableHead">
         <tr>
           <th data-sort="name">Актив <span class="sort-icon"></span></th>
-          <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
-          <th class="num" data-sort="open">Цена аукциона <span class="sort-icon"></span></th>
-          <th class="num" data-sort="change">Отклонение <span class="sort-icon"></span></th>
-          <th class="num">Лоты</th>
+          <th class="num" data-sort="close">Цена 5м <span class="sort-icon"></span></th>
+          <th class="num" data-sort="auction">Цена аукц. <span class="sort-icon"></span></th>
+          <th class="num" data-sort="deviation">Откл. % <span class="sort-icon"></span></th>
+          <th class="num" data-sort="lots">Лоты <span class="sort-icon"></span></th>
+          <th class="num" data-sort="imbalance">Дисбаланс <span class="sort-icon"></span></th>
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr><td colspan="5">Загрузка…</td></tr>
+        <tr><td colspan="6">Загрузка…</td></tr>
       </tbody>
     </table>
   </div>
 
   <script>
-    const STORAGE_IDS = 'damir_futures_selected_ids';
-    const STORAGE_NAMES = 'damir_futures_names';
-    const AUTO_REFRESH_INTERVAL_AUCTION = 5000; // 5 секунд во время аукциона
-    const AUTO_REFRESH_INTERVAL_NORMAL = 30 * 60 * 1000; // 30 минут обычно
+    // ========== Профили ==========
+    // Профиль определяется через URL: ?profile=metals, ?profile=stocks и т.д.
+    // Каждый профиль сохраняет свои настройки отдельно в localStorage.
+    // Без параметра profile используется профиль "default".
+    
+    function getProfileFromUrl() {
+      const params = new URLSearchParams(window.location.search);
+      return params.get('profile') || 'default';
+    }
+    
+    const CURRENT_PROFILE = getProfileFromUrl();
+    const STORAGE_IDS = 'damir_futures_selected_ids_' + CURRENT_PROFILE;
+    const STORAGE_NAMES = 'damir_futures_names'; // Общий для всех профилей
+    const AUTO_REFRESH_INTERVAL_AUCTION = 2000; // 2 секунды во время аукциона
+    const AUTO_REFRESH_INTERVAL_NORMAL = 60 * 60 * 1000; // 60 минут обычно
+    const MAX_INSTRUMENTS_LIMIT = 18; // Жёсткий лимит инструментов в одном запросе
+    
+    // Уникальный ID сессии для статистики
+    const SESSION_ID = 'session_' + Math.random().toString(36).substr(2, 9) + '_' + Date.now();
 
     let allFutures = [];
     let selectedIds = new Set(JSON.parse(localStorage.getItem(STORAGE_IDS) || '[]'));
@@ -251,34 +269,77 @@
     let currentRows = [];
     let sortColumn = 'name';
     let sortDirection = 'asc';
-    let viewMode = 'candles'; // 'candles' или 'orderbook'
     let auctionInfo = null;
+    
+    // Показываем название профиля
+    if (CURRENT_PROFILE !== 'default') {
+      document.getElementById('profileBadge').textContent = '[' + CURRENT_PROFILE + ']';
+    }
+    
+    // Функция для создания нового профиля
+    function createNewProfile() {
+      const name = prompt('Введите название профиля (латиницей, без пробелов):', '');
+      if (!name) return;
+      const cleanName = name.toLowerCase().replace(/[^a-z0-9_-]/g, '');
+      if (!cleanName) {
+        alert('Название должно содержать только латинские буквы, цифры, _ или -');
+        return;
+      }
+      const newUrl = window.location.pathname + '?profile=' + cleanName;
+      window.open(newUrl, '_blank');
+    }
+    
+    // Функция для копирования ссылки на текущий профиль
+    function copyProfileLink() {
+      const url = window.location.href;
+      navigator.clipboard.writeText(url).then(() => {
+        showMsg('Ссылка скопирована: ' + url, 'info');
+        setTimeout(() => showMsg(''), 3000);
+      }).catch(() => {
+        prompt('Скопируйте ссылку:', url);
+      });
+    }
+    
+    // Список доступных профилей (из localStorage)
+    function getAvailableProfiles() {
+      const profiles = ['default'];
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('damir_futures_selected_ids_')) {
+          const profile = key.replace('damir_futures_selected_ids_', '');
+          if (profile && !profiles.includes(profile)) {
+            profiles.push(profile);
+          }
+        }
+      }
+      return profiles;
+    }
 
     // Тикеры фьючерсов на акции (коды фьючерсов отличаются от акций!)
     const STOCK_TICKERS = [
-      // Фьючерсные коды
+      // Фьючерсные коды (короткие и длинные)
       'SR', 'SBRF',    // Сбербанк
-      'GZ', 'GAZR',    // Газпром
+      'GZ', 'GAZR', 'GAZPF',   // Газпром
       'LK', 'LKOH',    // Лукойл
       'RN', 'ROSN',    // Роснефть
       'VB', 'VTBR',    // ВТБ
       'GM', 'GMKN',    // Норникель
       'NK', 'NVTK',    // Новатэк
-      'PZ', 'PLZL',    // Полюс
-      'TT', 'TATN',    // Татнефть
+      'PZ', 'PLZL', 'PLZLM',   // Полюс
+      'TT', 'TATN', 'TATP',    // Татнефть
       'TN', 'TRNF',    // Транснефть
       'SN', 'SNGS',    // Сургутнефтегаз
       'SP', 'SNGSP',   // Сургут-п
       'BN', 'BANE',    // Башнефть
       'SG', 'SIBN',    // Газпромнефть
       'RF', 'RNFT',    // Русснефть
-      'YN', 'YNDX',    // Яндекс
+      'YN', 'YNDX', 'YDEX',    // Яндекс
       'MT', 'MTSS',    // МТС
       'MG', 'MAGN',    // ММК
       'NM', 'NLMK',    // НЛМК
       'CH', 'CHMF',    // Северсталь
       'AL', 'ALRS',    // АЛРОСА
-      'AF', 'AFLT',    // Аэрофлот
+      'AF', 'AFLT', 'AFKS',    // Аэрофлот, АФК Система
       'ME', 'MOEX',    // Мосбиржа
       'TC', 'TCSG',    // Тинькофф
       'RL', 'RUAL',    // РУСАЛ
@@ -288,44 +349,165 @@
       'FS', 'FEES',    // ФСК
       'HY', 'HYDR',    // РусГидро
       'IR', 'IRAO',    // Интер РАО
-      'RT', 'RTKM',    // Ростелеком
+      'RT', 'RTKM', 'RTKMP',   // Ростелеком
       'PL', 'POLY',    // Полиметалл
       'LE', 'LEAS',    // Европлан
       'FL', 'FLOT',    // Совкомфлот
-      'SV', 'SVCB',    // Совкомбанк
+      'SVCB',    // Совкомбанк (без SV - конфликт с SILV)
       'OZ', 'OZON',    // Озон
       'PO', 'POSI',    // Positive
       'HH', 'HHRU',    // HeadHunter
-      'ML', 'MAIL',    // VK
-      'FV', 'FIVE',    // X5
+      'ML', 'MAIL', 'VKCO',    // VK
+      'FV', 'FIVE', 'X5',      // X5
+      // Дополнительные из списка задачи
+      'IVAT',    // Ивантеевка
+      'SGZH',    // Сегежа
+      'WUSH',    // Whoosh
+      'KMAZ',    // КАМАЗ
+      'MDMG',    // MD Medical
+      'CBOM',    // МКБ
+      'BSPB',    // Банк СПб
+      'ASTR',    // Астра
+      'SMLT',    // Самолёт
+      'SOFL',    // Софтлайн
+      'ENPG',    // Эн+
+      'MVID',    // М.Видео
+      'NOTKM',   // Новатэк (другой тикер)
+      'BELUGA', // Белуга
+      'HEAD',    // HeadHunter (другой тикер)
+      'FESH',    // ДВМП
+      'ISKJ',    // Искра
+      'UPRO',    // Юнипро
+      'SPBE',    // СПБ Биржа
+      'SFIN',    // SFI
+      'MTLR',    // Мечел
+      'RASP',    // Распадская
+      'RENI',    // Ренессанс
+      'T-',      // Т-Банк (фьючерсы T-3.26, T-6.26)
+      'PX',      // ПИК (короткий код)
+      'GK',      // ГМК Норникель (короткий код)
     ];
 
     // Категоризация по тикеру/названию
     const CATEGORY_RULES = {
       metals: {
-        tickers: ['GOLD', 'SILV', 'PLAT', 'PALL', 'GD', 'SV', 'PT', 'PD'],
-        keywords: ['золот', 'серебр', 'платин', 'паллад', 'gold', 'silver', 'platinum', 'palladium']
+        tickers: ['GOLD', 'GOLDM', 'SILV', 'PLAT', 'PALL', 'GD', 'PT', 'PD', 'ALUM', 'NICKEL', 'ZINC', 'COPPER'],
+        keywords: ['золот', 'серебр', 'платин', 'паллад', 'gold', 'silver', 'platinum', 'palladium', 'алюмин', 'никель', 'цинк', 'медь']
       },
       crypto: {
         tickers: ['BTC', 'ETH', 'BTCUSDT', 'ETHUSDT'],
         keywords: ['биткоин', 'эфир', 'крипт', 'bitcoin', 'ethereum', 'crypto']
       },
       indices: {
-        tickers: ['MIX', 'IMOEX', 'RTS', 'RTSI'],
+        tickers: ['MIX', 'IMOEX', 'IMOEXF', 'RTS', 'RTSI', 'IPO', 'OGI', 'FNI', 'NASD', 'NIKK', 'STOX', 'SPYF', 'R2000', 'DAX', 'DJ30', 'HANG'],
         keywords: ['индекс', 'index']
       },
       currencies: {
-        tickers: ['Si', 'Eu', 'CNY', 'GBP', 'JPY', 'CHF', 'USDRUB', 'EURRUB', 'CNYRUB'],
+        tickers: ['Si', 'Eu', 'CNY', 'UCNY', 'GBP', 'GBPU', 'JPY', 'UJPY', 'CHF', 'USDRUB', 'EURRUB', 'CNYRUB', 'TRY', 'AED', 'INR', 'AUDU', 'AMD', 'HKD', 'KZT'],
         keywords: ['курс доллар', 'курс евро', 'курс юан', 'currency']
       },
       commodities: {
-        tickers: ['BR', 'NG', 'CL', 'WHEAT', 'CORN', 'SOYB', 'SUGAR', 'COFFEE', 'Co', 'WH'],
-        keywords: ['нефть brent', 'природный газ', 'пшениц', 'кукуруз', 'соя', 'сахар', 'кофе', 'wheat', 'natural gas']
+        tickers: ['BR', 'BRM', 'NG', 'NGM', 'CL', 'WHEAT', 'CORN', 'SOYB', 'SUGAR', 'COFFEE', 'Co', 'WH', 'ORANGE', 'COCOA'],
+        keywords: ['нефть brent', 'природный газ', 'пшениц', 'кукуруз', 'соя', 'сахар', 'кофе', 'wheat', 'natural gas', 'апельсин', 'какао']
+      },
+      other: {
+        tickers: ['TENCENT', 'ARGT'],
+        keywords: []
       },
       stocks: {
         tickers: STOCK_TICKERS,
         keywords: []
       }
+    };
+
+    // Явные переопределения категорий для конфликтующих тикеров
+    // Формат: начало тикера -> категория
+    const TICKER_OVERRIDES = {
+      // Акции (фьюч) - короткие коды
+      'PX': 'stocks',   // ПИК
+      'GK': 'stocks',   // ГМК Норникель
+      'PS': 'stocks',
+      'MD': 'stocks',
+      'IS': 'stocks',
+      'CM': 'stocks',
+      'AK': 'stocks',
+      'IV': 'stocks',
+      'EA': 'stocks',
+      'SS': 'stocks',
+      'NV': 'stocks',
+      'RU': 'stocks',
+      'S0': 'stocks',
+      'PI': 'stocks',
+      'MC': 'stocks',
+      'UN': 'stocks',
+      'NM': 'stocks',
+      'WU': 'stocks',
+      'KM': 'stocks',
+      'RD': 'stocks',
+      'VK': 'stocks',
+      'HD': 'stocks',
+      'TB': 'stocks',
+      'TP': 'stocks',
+      'FE': 'stocks',
+      'MV': 'stocks',
+      'YD': 'stocks',
+      'RA': 'stocks',
+      'SE': 'stocks',
+      'NB': 'stocks',
+      'ON': 'stocks',
+      'SC': 'stocks',
+      'SO': 'stocks',
+      'AS': 'stocks',
+      'SZ': 'stocks',
+      'SH': 'stocks',
+      'BS': 'stocks',
+      'RQ': 'stocks',
+      // Индексы
+      'AG': 'indices',  // Индекс
+      'OG': 'indices',  // Индекс
+      'TC': 'indices',  // Индекс (не путать с TCSG-Тинькофф)
+      'IP': 'indices',  // IPO индекс
+      'FN': 'indices',  // Финансовый индекс
+      'BZ': 'indices',  // Индекс
+      'SD': 'indices',  // Индекс
+      'BD': 'indices',  // Индекс
+      'SF': 'indices',  // Индекс
+      'DX': 'indices',  // Индекс
+      'R2': 'indices',  // R2000 индекс
+      'AA': 'indices',  // Индекс
+      'HS': 'indices',  // Hang Seng индекс
+      'N2': 'indices',  // Nikkei индекс
+      'VI': 'indices',  // VIX индекс
+      'EM': 'indices',  // Emerging Markets индекс
+      'NA': 'indices',  // NASDAQ индекс
+      'CI': 'indices',  // Индекс
+      'BB': 'indices',  // Индекс
+      'XI': 'indices',  // Индекс
+      'SX': 'indices',  // STOXX индекс
+      'DJ': 'indices',  // Dow Jones индекс
+      // Металлы
+      'GN': 'metals',   // Никель
+      'ZC': 'metals',   // Цинк
+      'AN': 'metals',   // Алюминий
+      'NC': 'metals',   // Никель
+      // Валюты
+      'JP': 'currencies', // Йена
+      'UC': 'currencies', // Юань
+      'BY': 'currencies',
+      'GU': 'currencies',
+      'TY': 'currencies',
+      'AU': 'currencies',
+      'AE': 'currencies',
+      'HK': 'currencies',
+      'AR': 'currencies',
+      'KZ': 'currencies',
+      'I2': 'currencies',
+      // Товары
+      'BM': 'commodities', // Brent
+      'NR': 'commodities', // Природный газ
+      'CC': 'commodities', // Какао
+      // Крипта
+      'EH': 'crypto',   // Эфириум
     };
 
     function detectCategory(ticker, name, instrumentType) {
@@ -337,28 +519,42 @@
       const tickerUpper = (ticker || '').toUpperCase();
       const nameLower = (name || '').toLowerCase();
       
-      // Для фьючерсов - проверяем, не является ли это фьючерсом на акцию
-      for (const stockTicker of STOCK_TICKERS) {
-        if (tickerUpper.includes(stockTicker.toUpperCase())) {
-          return 'stocks';
+      // Сначала проверяем явные переопределения (приоритет над всем)
+      for (const [prefix, category] of Object.entries(TICKER_OVERRIDES)) {
+        if (tickerUpper.startsWith(prefix.toUpperCase())) {
+          return category;
         }
       }
       
-      // Проверяем остальные категории
+      // Собираем все правила со всех категорий и сортируем по длине тикера (длинные первыми)
+      const allRules = [];
       for (const [category, rules] of Object.entries(CATEGORY_RULES)) {
-        if (category === 'stocks') continue; // уже проверили
-        
-        for (const t of rules.tickers) {
-          if (tickerUpper.includes(t.toUpperCase())) {
-            return category;
-          }
+        for (const t of rules.tickers || []) {
+          allRules.push({ ticker: t.toUpperCase(), category });
         }
-        for (const kw of rules.keywords) {
+      }
+      // Сортируем по длине тикера (длинные первыми)
+      allRules.sort((a, b) => b.ticker.length - a.ticker.length);
+      
+      // Проверяем тикеры (длинные совпадения имеют приоритет)
+      for (const rule of allRules) {
+        if (tickerUpper.includes(rule.ticker)) {
+          return rule.category;
+        }
+      }
+      
+      // Проверяем ключевые слова
+      const categoryOrder = ['metals', 'crypto', 'indices', 'currencies', 'commodities', 'other', 'stocks'];
+      for (const category of categoryOrder) {
+        const rules = CATEGORY_RULES[category];
+        if (!rules) continue;
+        for (const kw of rules.keywords || []) {
           if (nameLower.includes(kw.toLowerCase())) {
             return category;
           }
         }
       }
+      
       return 'other';
     }
 
@@ -421,7 +617,7 @@
     }
 
     async function loadFutures() {
-      const r = await fetchWithTimeout('/api/futures', 15000);
+      const r = await fetchWithTimeout('/api/futures?session_id=' + encodeURIComponent(SESSION_ID), 15000);
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         showMsg(err.error || 'Ошибка загрузки списка инструментов', 'error');
@@ -435,6 +631,26 @@
       });
       try { localStorage.setItem(STORAGE_NAMES, JSON.stringify(namesMap)); } catch (_) {}
       return allFutures;
+    }
+
+    function updateLimitWarning() {
+      const checkedCount = document.querySelectorAll('#settingsList input[type=checkbox]:checked').length;
+      const limitInfo = document.getElementById('limitInfo');
+      const limitWarning = document.getElementById('limitWarning');
+      
+      if (limitInfo) {
+        limitInfo.textContent = checkedCount + '/' + MAX_INSTRUMENTS_LIMIT;
+        limitInfo.style.color = checkedCount > MAX_INSTRUMENTS_LIMIT ? 'var(--negative)' : 'var(--accent)';
+      }
+      
+      if (limitWarning) {
+        if (checkedCount > MAX_INSTRUMENTS_LIMIT) {
+          limitWarning.textContent = '⚠️ Выбрано ' + checkedCount + ' инструментов. Лимит: ' + MAX_INSTRUMENTS_LIMIT + '. Лишние не будут обновляться в реальном времени (ограничение API).';
+          limitWarning.style.display = 'block';
+        } else {
+          limitWarning.style.display = 'none';
+        }
+      }
     }
 
     function renderSettings(filter = '') {
@@ -462,12 +678,14 @@
         cb.value = id;
         cb.checked = selectedIds.has(id);
         cb.dataset.figi = f.figi;
+        cb.addEventListener('change', updateLimitWarning);
         label.appendChild(cb);
         label.appendChild(document.createTextNode(displayName));
         list.appendChild(label);
       });
       
       updateCategoryButtons();
+      updateLimitWarning();
     }
 
     function filterSettings() {
@@ -496,8 +714,8 @@
             valB = (b.name || '').toLowerCase();
             break;
           case 'close':
-            valA = a.close ?? -Infinity;
-            valB = b.close ?? -Infinity;
+            valA = a.candle_5min_close ?? a.close ?? -Infinity;
+            valB = b.candle_5min_close ?? b.close ?? -Infinity;
             break;
           case 'open':
             valA = a.open ?? a.auction_price ?? -Infinity;
@@ -508,21 +726,17 @@
             valA = a.change_pct ?? a.deviation_pct ?? -Infinity;
             valB = b.change_pct ?? b.deviation_pct ?? -Infinity;
             break;
-          case 'bid':
-            valA = a.total_bid_lots ?? -Infinity;
-            valB = b.total_bid_lots ?? -Infinity;
-            break;
-          case 'ask':
-            valA = a.total_ask_lots ?? -Infinity;
-            valB = b.total_ask_lots ?? -Infinity;
+          case 'imbalance':
+            valA = a.imbalance ?? -Infinity;
+            valB = b.imbalance ?? -Infinity;
             break;
           case 'auction':
             valA = a.auction_price ?? -Infinity;
             valB = b.auction_price ?? -Infinity;
             break;
           case 'lots':
-            valA = a.total_lots ?? -Infinity;
-            valB = b.total_lots ?? -Infinity;
+            valA = a.executed_lots ?? a.total_lots ?? -Infinity;
+            valB = b.executed_lots ?? b.total_lots ?? -Infinity;
             break;
           default:
             return 0;
@@ -547,28 +761,54 @@
     function renderTable(rows) {
       const tbody = document.getElementById('tableBody');
       if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5">Выберите инструменты в настройках или данных пока нет.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="6">Выберите инструменты в настройках или данных пока нет.</td></tr>';
         return;
       }
       const sorted = sortRows(rows);
       tbody.innerHTML = sorted.map(row => {
         const name = row.name || row.instrument_id;
-        const close = formatPrice(row.close);
-        const open = formatPrice(row.open);
-        const lots = row.total_lots != null ? row.total_lots : '—';
-        let pct = '—';
-        let pctClass = 'pct-null';
-        if (row.change_pct != null) {
-          pct = row.change_pct > 0 ? '+' + row.change_pct : String(row.change_pct);
-          pctClass = row.change_pct > 0 ? 'pct-positive' : row.change_pct < 0 ? 'pct-negative' : 'pct-null';
+        
+        // Цена закрытия последней 5-минутной свечи
+        const closePrice = row.candle_5min_close != null ? formatPrice(row.candle_5min_close) : 
+                          (row.close_price != null ? formatPrice(row.close_price) : '—');
+        
+        // Цена аукциона
+        const auctionPrice = row.auction_price != null ? formatPrice(row.auction_price) : '—';
+        
+        // Отклонение
+        let devPct = '—';
+        let devClass = 'pct-null';
+        const deviation = row.deviation_pct ?? row.change_pct;
+        if (deviation != null) {
+          devPct = deviation > 0 ? '+' + deviation : String(deviation);
+          devClass = deviation > 0 ? 'pct-positive' : deviation < 0 ? 'pct-negative' : 'pct-null';
         }
+        
+        // Лоты - количество лотов, которые ИСПОЛНЯТСЯ
+        const executedLots = row.executed_lots != null ? row.executed_lots : (row.total_lots != null ? row.total_lots : '—');
+        
+        // Дисбаланс - количество лотов, которые НЕ исполнятся
+        let imbalance = '—';
+        let imbalanceClass = 'pct-null';
+        if (row.imbalance != null && row.imbalance !== 0) {
+          imbalance = String(row.imbalance);
+          if (row.imbalance_direction === 'bid') {
+            imbalanceClass = 'pct-positive';  // Покупатели преобладают — зелёный
+          } else if (row.imbalance_direction === 'ask') {
+            imbalanceClass = 'pct-negative';  // Продавцы преобладают — красный
+          }
+        } else if (row.imbalance === 0) {
+          imbalance = '0';
+        }
+        
         return (
           '<tr>' +
           '<td>' + escapeHtml(name) + '</td>' +
-          '<td class="num">' + close + '</td>' +
-          '<td class="num">' + open + '</td>' +
-          '<td class="num ' + pctClass + '">' + pct + (row.change_pct != null ? '%' : '') + '</td>' +
-          '<td class="num">' + lots + '</td>' +
+          '<td class="num">' + closePrice + '</td>' +
+          '<td class="num">' + auctionPrice + '</td>' +
+          '<td class="num ' + devClass + '">' + devPct + (deviation != null ? '%' : '') + '</td>' +
+          '<td class="num">' + executedLots + '</td>' +
+          '<td class="num ' + imbalanceClass + '">' + imbalance + '</td>' +
           '</tr>'
         );
       }).join('');
@@ -581,61 +821,27 @@
       return div.innerHTML;
     }
 
-    const MAX_INSTRUMENTS_PER_REQUEST = 20; // чтобы запрос не зависал
-
-    async function loadTable(skipLoading) {
-      const ids = Array.from(selectedIds).filter(Boolean).slice(0, MAX_INSTRUMENTS_PER_REQUEST);
-      if (ids.length === 0) {
-        currentRows = [];
-        renderTable([]);
-        return;
-      }
-      if (!skipLoading) setLoading(true);
-      showMsg('');
-      try {
-        const r = await fetchWithTimeout('/api/table?ids=' + encodeURIComponent(ids.join(',')), 45000);
-        if (!r.ok) {
-          const err = await r.json().catch(() => ({}));
-          showMsg(err.error || 'Ошибка загрузки данных', 'error');
-          currentRows = [];
-          renderTable([]);
-          return;
-        }
-        const data = await r.json();
-        currentRows = data.rows || [];
-        currentRows.forEach(row => {
-          row.name = namesMap[row.instrument_id] || row.instrument_id;
-        });
-        renderTable(currentRows);
-        updateLastUpdate();
-        if (selectedIds.size > MAX_INSTRUMENTS_PER_REQUEST) {
-          showMsg('Показаны первые ' + MAX_INSTRUMENTS_PER_REQUEST + ' инструментов. Выберите меньше в настройках для быстрой загрузки.', 'info');
-        }
-      } catch (e) {
-        showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Выберите меньше инструментов в настройках.' : ('Ошибка: ' + (e.message || e)), 'error');
-        currentRows = [];
-        renderTable([]);
-      } finally {
-        setLoading(false);
-      }
-    }
+    const MAX_INSTRUMENTS_PER_REQUEST = MAX_INSTRUMENTS_LIMIT; // Лимит серверного кэширования
 
     async function loadOrderbook(skipLoading) {
       const ids = Array.from(selectedIds).filter(Boolean).slice(0, MAX_INSTRUMENTS_PER_REQUEST);
       if (ids.length === 0) {
         currentRows = [];
-        renderOrderbookTable([]);
+        renderTable([]);
         return;
       }
       if (!skipLoading) setLoading(true);
       showMsg('');
       try {
-        const r = await fetchWithTimeout('/api/orderbook?ids=' + encodeURIComponent(ids.join(',')), 45000);
+        const r = await fetchWithTimeout('/api/orderbook?ids=' + encodeURIComponent(ids.join(',')) + '&session_id=' + encodeURIComponent(SESSION_ID), 45000);
         if (!r.ok) {
           const err = await r.json().catch(() => ({}));
-          showMsg(err.error || 'Ошибка загрузки стакана', 'error');
-          currentRows = [];
-          renderOrderbookTable([]);
+          showMsg(err.error || 'Ошибка загрузки данных', 'error');
+          // Если это не первый запрос и есть предыдущие данные, оставляем их на экране
+          if (!currentRows || currentRows.length === 0) {
+            currentRows = [];
+            renderTable([]);
+          }
           return;
         }
         const data = await r.json();
@@ -644,16 +850,30 @@
         currentRows.forEach(row => {
           row.name = namesMap[row.instrument_id] || row.instrument_id;
         });
-        renderOrderbookTable(currentRows);
+        renderTable(currentRows);
         updateAuctionBadge();
         updateLastUpdate();
-        if (selectedIds.size > MAX_INSTRUMENTS_PER_REQUEST) {
-          showMsg('Показаны первые ' + MAX_INSTRUMENTS_PER_REQUEST + ' инструментов.', 'info');
+        
+        // Показываем предупреждение о лимите
+        if (data.limit_warning) {
+          showMsg(data.limit_warning, 'error');
+        } else if (selectedIds.size > MAX_INSTRUMENTS_PER_REQUEST) {
+          showMsg('Лимит: ' + MAX_INSTRUMENTS_PER_REQUEST + ' инструментов. Выбрано: ' + selectedIds.size + '. Лишние не будут обновляться в реальном времени.', 'error');
         }
       } catch (e) {
-        showMsg(e.name === 'AbortError' ? 'Таймаут загрузки. Выберите меньше инструментов в настройках.' : ('Ошибка: ' + (e.message || e)), 'error');
-        currentRows = [];
-        renderOrderbookTable([]);
+        showMsg(
+          e.name === 'AbortError'
+            ? 'Таймаут загрузки. Выберите меньше инструментов в настройках.'
+            : ('Ошибка: ' + (e.message || e)),
+          'error'
+        );
+        // При ошибке сохраняем предыдущие данные, чтобы таблица не пропадала
+        if (!currentRows || currentRows.length === 0) {
+          currentRows = [];
+          renderTable([]);
+        } else {
+          renderTable(currentRows);
+        }
       } finally {
         setLoading(false);
       }
@@ -662,9 +882,16 @@
     function updateAuctionBadge() {
       const badge = document.getElementById('auctionBadge');
       const indicator = document.getElementById('modeIndicator');
-      if (auctionInfo && auctionInfo.is_auction) {
-        const type = auctionInfo.auction_type === 'opening' ? 'ОТКРЫТИЕ' : 'ЗАКРЫТИЕ';
-        badge.innerHTML = '<span class="auction-badge">АУКЦИОН ' + type + '</span>';
+      if (auctionInfo && auctionInfo.is_any_auction) {
+        // Показываем активные аукционы
+        let badges = [];
+        if (auctionInfo.shares_auction) {
+          badges.push('<span class="auction-badge">' + auctionInfo.shares_auction + '</span>');
+        }
+        if (auctionInfo.futures_auction) {
+          badges.push('<span class="auction-badge">' + auctionInfo.futures_auction + '</span>');
+        }
+        badge.innerHTML = badges.join(' ');
         indicator.textContent = 'МСК: ' + auctionInfo.moscow_time;
         indicator.classList.add('auction');
       } else {
@@ -676,97 +903,8 @@
       }
     }
 
-    function updateTableHeader() {
-      const thead = document.getElementById('tableHead');
-      if (viewMode === 'orderbook') {
-        thead.innerHTML = `
-          <tr>
-            <th data-sort="name">Актив <span class="sort-icon"></span></th>
-            <th class="num" data-sort="bid">Bid <span class="sort-icon"></span></th>
-            <th class="num" data-sort="ask">Ask <span class="sort-icon"></span></th>
-            <th class="num" data-sort="auction">Цена аукц. <span class="sort-icon"></span></th>
-            <th class="num" data-sort="deviation">Отклонение <span class="sort-icon"></span></th>
-            <th class="num" data-sort="lots">Лоты <span class="sort-icon"></span></th>
-          </tr>
-        `;
-        // Re-attach sort listeners
-        document.querySelectorAll('th[data-sort]').forEach(th => {
-          th.addEventListener('click', () => handleSort(th.dataset.sort));
-        });
-        updateSortIcons();
-      } else {
-        thead.innerHTML = `
-          <tr>
-            <th data-sort="name">Актив <span class="sort-icon"></span></th>
-            <th class="num" data-sort="close">Цена закрытия <span class="sort-icon"></span></th>
-            <th class="num" data-sort="open">Цена аукциона <span class="sort-icon"></span></th>
-            <th class="num" data-sort="change">Отклонение <span class="sort-icon"></span></th>
-            <th class="num">Лоты</th>
-          </tr>
-        `;
-        // Re-attach sort listeners
-        document.querySelectorAll('th[data-sort]').forEach(th => {
-          th.addEventListener('click', () => handleSort(th.dataset.sort));
-        });
-        updateSortIcons();
-      }
-    }
-
-    function renderOrderbookTable(rows) {
-      const tbody = document.getElementById('tableBody');
-      if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6">Нет данных стакана.</td></tr>';
-        return;
-      }
-      const sorted = sortRows(rows);
-      tbody.innerHTML = sorted.map(row => {
-        const name = row.name || row.instrument_id;
-        // Bid и Ask - общее количество контрактов (не цены!)
-        const bid = row.total_bid_lots != null ? row.total_bid_lots : '—';
-        const ask = row.total_ask_lots != null ? row.total_ask_lots : '—';
-        const auctionPrice = row.auction_price != null ? formatPrice(row.auction_price) : '—';
-        let devPct = '—';
-        let devClass = 'pct-null';
-        if (row.deviation_pct != null) {
-          devPct = row.deviation_pct > 0 ? '+' + row.deviation_pct : String(row.deviation_pct);
-          devClass = row.deviation_pct > 0 ? 'pct-positive' : row.deviation_pct < 0 ? 'pct-negative' : 'pct-null';
-        }
-        // Лоты - количество лотов, которые пройдут по цене аукциона
-        const lots = row.total_lots != null ? row.total_lots : '—';
-        return (
-          '<tr>' +
-          '<td>' + escapeHtml(name) + '</td>' +
-          '<td class="num pct-positive">' + bid + '</td>' +
-          '<td class="num pct-negative">' + ask + '</td>' +
-          '<td class="num">' + auctionPrice + '</td>' +
-          '<td class="num ' + devClass + '">' + devPct + (row.deviation_pct != null ? '%' : '') + '</td>' +
-          '<td class="num">' + lots + '</td>' +
-          '</tr>'
-        );
-      }).join('');
-      updateSortIcons();
-    }
-
-    function toggleMode() {
-      try {
-        viewMode = viewMode === 'candles' ? 'orderbook' : 'candles';
-        const btn = document.getElementById('btnMode');
-        if (btn) {
-          btn.textContent = viewMode === 'candles' ? 'Режим: Свечи' : 'Режим: Стакан';
-          if (viewMode === 'orderbook') btn.classList.add('active');
-          else btn.classList.remove('active');
-        }
-        updateTableHeader();
-        loadData();
-      } catch (e) { console.error('toggleMode', e); }
-    }
-
     function loadData(skipLoading) {
-      if (viewMode === 'orderbook') {
-        loadOrderbook(skipLoading);
-      } else {
-        loadTable(skipLoading);
-      }
+      loadOrderbook(skipLoading);
     }
 
     function toggleSettings() {
@@ -777,6 +915,9 @@
         // Сначала переключаем видимость панели (синхронно), потом подгружаем список
         panel.style.display = isVisible ? 'none' : 'block';
         if (panel.style.display === 'none') return;
+        // Показываем название профиля в настройках
+        const profileNameEl = document.getElementById('profileNameInSettings');
+        if (profileNameEl) profileNameEl.textContent = CURRENT_PROFILE;
         const searchEl = document.getElementById('searchInput');
         if (searchEl) searchEl.value = '';
         if (allFutures.length === 0) {
@@ -805,12 +946,15 @@
 
     function selectAll() {
       document.querySelectorAll('#settingsList label:not(.hidden) input[type=checkbox]').forEach(cb => { cb.checked = true; });
+      updateLimitWarning();
     }
     function selectNone() {
       document.querySelectorAll('#settingsList input[type=checkbox]').forEach(cb => { cb.checked = false; });
+      updateLimitWarning();
     }
     function selectFiltered() {
       document.querySelectorAll('#settingsList label:not(.hidden) input[type=checkbox]').forEach(cb => { cb.checked = true; });
+      updateLimitWarning();
     }
 
     function toggleAutoRefresh() {
@@ -842,33 +986,40 @@
       const now = new Date();
       const utcHour = now.getUTCHours();
       const utcMinute = now.getUTCMinutes();
+      const utcDay = now.getUTCDay(); // 0 = воскресенье, 6 = суббота
       const mskTotalMin = (utcHour + 3) * 60 + utcMinute;
       const mskMinOfDay = mskTotalMin % (24 * 60);
-      const mskHour = Math.floor(mskMinOfDay / 60);
-      const mskMinute = mskMinOfDay % 60;
-      const timeMinutes = mskHour * 60 + mskMinute;
-      // День недели в Москве (0=вс, 1=пн, ..., 6=сб)
-      const mskDayOffset = (utcHour + 3) >= 24 ? 1 : 0;
-      const weekday = (now.getUTCDay() + mskDayOffset) % 7;
+      const timeMinutes = mskMinOfDay;
       
-      // Аукцион открытия: Пн-Пт 8:50-9:00, Сб-Вс 9:50-10:00
-      // За 5 минут до и 5 минут после = Пн-Пт 8:45-9:05, Сб-Вс 9:45-10:05
-      let openingStart, openingEnd;
-      if (weekday >= 1 && weekday <= 5) { // Пн-Пт
-        openingStart = 8 * 60 + 45; // 8:45
-        openingEnd = 9 * 60 + 5;   // 9:05
-      } else { // Сб-Вс
-        openingStart = 9 * 60 + 45;  // 9:45
-        openingEnd = 10 * 60 + 5;   // 10:05
+      // Корректируем день недели для МСК (если перешли на следующий день)
+      let mskDay = utcDay;
+      if (utcHour + 3 >= 24) {
+        mskDay = (utcDay + 1) % 7;
+      }
+      const isWeekend = (mskDay === 0 || mskDay === 6); // воскресенье или суббота
+      
+      // Расписание аукционов (МСК):
+      // Будни:
+      //   Акции: 6:50-7:00 (открытие), 18:40-18:45 (закрытие), 18:45-18:50 (частичный)
+      //   Фьючерсы: 8:50-9:00 (открытие)
+      // Выходные (суббота, воскресенье):
+      //   9:50-10:00
+      // Добавляем буфер ±2 минуты для подготовки
+      
+      let auctionWindows;
+      if (isWeekend) {
+        auctionWindows = [
+          { start: 9 * 60 + 48, end: 10 * 60 + 2 },   // Выходные: 9:50-10:00
+        ];
+      } else {
+        auctionWindows = [
+          { start: 6 * 60 + 48, end: 7 * 60 + 2 },     // Акции: открытие
+          { start: 8 * 60 + 48, end: 9 * 60 + 2 },     // Фьючерсы: открытие
+          { start: 18 * 60 + 38, end: 18 * 60 + 52 },  // Акции: закрытие + частичный
+        ];
       }
       
-      // Аукцион закрытия: 18:40-18:50 каждый день; окно 18:35-18:55
-      const closingStart = 18 * 60 + 35;
-      const closingEnd = 18 * 60 + 55;
-      
-      const isAuctionTime =
-        (timeMinutes >= openingStart && timeMinutes <= openingEnd) ||
-        (timeMinutes >= closingStart && timeMinutes <= closingEnd);
+      const isAuctionTime = auctionWindows.some(w => timeMinutes >= w.start && timeMinutes <= w.end);
       
       return isAuctionTime ? AUTO_REFRESH_INTERVAL_AUCTION : AUTO_REFRESH_INTERVAL_NORMAL;
     }
@@ -877,9 +1028,9 @@
       const status = document.getElementById('autoStatus');
       const interval = getRefreshInterval();
       if (interval === AUTO_REFRESH_INTERVAL_AUCTION) {
-        status.textContent = 'обновление каждые 5 сек (аукцион)';
+        status.textContent = 'обновление каждые 2 сек (аукцион)';
       } else {
-        status.textContent = 'обновление каждые 30 мин';
+        status.textContent = 'обновление каждый час';
       }
     }
 

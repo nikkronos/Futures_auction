@@ -2,6 +2,12 @@
 Backend для виджета «Таблица фьючерсов» Т-Инвестиции.
 Использует REST API T-Invest (без SDK).
 Токен читается из переменной окружения TINKOFF_INVEST_TOKEN.
+
+Серверное кэширование v5:
+- Фоновый поток обновляет данные по активным инструментам
+- Все пользователи получают данные из общего кэша
+- Лимит: 18 инструментов (ограничение API: 600 запросов/мин)
+- Интервал: 2 сек (аукцион) / 60 сек (обычное время)
 """
 import logging
 import os
@@ -15,13 +21,75 @@ import urllib3
 # Отключаем предупреждения об SSL (для локального тестирования)
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
+# ========== Конфигурация ==========
+# Лимиты T-Invest API: 600 запросов/мин на сервис котировок
+# При 2 сек интервале: 30 обновлений/мин × N инструментов ≤ 600 → N ≤ 20
+# С запасом: 18 инструментов
+MAX_CACHED_INSTRUMENTS = 18
+BACKGROUND_INTERVAL_AUCTION = 2      # 2 секунды во время аукциона
+BACKGROUND_INTERVAL_NORMAL = 3600    # 60 минут вне аукциона
+ACTIVE_INSTRUMENT_TTL = 300          # 5 минут - инструмент считается активным
+
 # ========== Кэширование ==========
 # TTL в секундах
 CACHE_TTL_FUTURES = 300  # 5 минут - список фьючерсов редко меняется
-CACHE_TTL_CANDLES = 10   # 10 секунд - для обновления раз в 5 секунд
+CACHE_TTL_CANDLES = 60   # 60 секунд - свечи обновляются фоновым потоком
 
 _cache = {}
 _cache_lock = threading.Lock()
+
+# ========== Серверный кэш данных ==========
+# Хранит данные стакана и свечей для активных инструментов
+_server_cache = {
+    "orderbook": {},      # {instrument_id: {data, updated_at}}
+    "candles": {},        # {instrument_id: {data, updated_at}}
+    "active": {},         # {instrument_id: last_requested_at}
+}
+_server_cache_lock = threading.Lock()
+_background_thread = None
+_background_running = False
+
+# ========== Статистика запросов ==========
+STATS_WINDOW_SECONDS = 300  # 5 минут
+_stats = {
+    "requests": [],  # [(timestamp, endpoint, session_id), ...]
+    "sessions": {},  # {session_id: last_seen_timestamp}
+}
+_stats_lock = threading.Lock()
+
+
+def _record_request(endpoint, session_id=None):
+    """Записать запрос в статистику."""
+    now = time.time()
+    with _stats_lock:
+        _stats["requests"].append((now, endpoint, session_id))
+        if session_id:
+            _stats["sessions"][session_id] = now
+        # Очистка старых записей
+        cutoff = now - STATS_WINDOW_SECONDS
+        _stats["requests"] = [(t, e, s) for t, e, s in _stats["requests"] if t > cutoff]
+        _stats["sessions"] = {s: t for s, t in _stats["sessions"].items() if t > cutoff}
+
+
+def _get_stats():
+    """Получить статистику за последние 5 минут."""
+    now = time.time()
+    cutoff = now - STATS_WINDOW_SECONDS
+    with _stats_lock:
+        recent_requests = [(t, e, s) for t, e, s in _stats["requests"] if t > cutoff]
+        active_sessions = {s: t for s, t in _stats["sessions"].items() if t > cutoff}
+    
+    # Группировка по endpoint
+    by_endpoint = {}
+    for _, endpoint, _ in recent_requests:
+        by_endpoint[endpoint] = by_endpoint.get(endpoint, 0) + 1
+    
+    return {
+        "total_requests_5min": len(recent_requests),
+        "unique_sessions_5min": len(active_sessions),
+        "requests_by_endpoint": by_endpoint,
+        "window_seconds": STATS_WINDOW_SECONDS,
+    }
 
 
 def _cache_get(key):
@@ -41,6 +109,75 @@ def _cache_set(key, value, ttl_seconds):
     """Сохранить значение в кэш с TTL."""
     with _cache_lock:
         _cache[key] = (value, time.time() + ttl_seconds)
+
+
+# ========== Серверный кэш: управление активными инструментами ==========
+
+def _mark_instrument_active(instrument_id):
+    """Отметить инструмент как активный (запрошен пользователем)."""
+    now = time.time()
+    with _server_cache_lock:
+        _server_cache["active"][instrument_id] = now
+
+
+def _get_active_instruments():
+    """Получить список активных инструментов (запрошенных за последние 5 минут)."""
+    now = time.time()
+    cutoff = now - ACTIVE_INSTRUMENT_TTL
+    with _server_cache_lock:
+        active = {k: v for k, v in _server_cache["active"].items() if v > cutoff}
+        _server_cache["active"] = active
+        # Сортируем по времени последнего запроса (недавние первыми)
+        sorted_ids = sorted(active.keys(), key=lambda x: active[x], reverse=True)
+        return sorted_ids[:MAX_CACHED_INSTRUMENTS]
+
+
+def _get_cached_orderbook(instrument_id):
+    """Получить данные стакана из серверного кэша."""
+    with _server_cache_lock:
+        item = _server_cache["orderbook"].get(instrument_id)
+        if item:
+            return item.get("data")
+    return None
+
+
+def _set_cached_orderbook(instrument_id, data):
+    """Сохранить данные стакана в серверный кэш."""
+    with _server_cache_lock:
+        _server_cache["orderbook"][instrument_id] = {
+            "data": data,
+            "updated_at": time.time(),
+        }
+
+
+def _get_cached_candle(instrument_id):
+    """Получить данные свечи из серверного кэша."""
+    with _server_cache_lock:
+        item = _server_cache["candles"].get(instrument_id)
+        if item:
+            return item.get("data")
+    return None
+
+
+def _set_cached_candle(instrument_id, data):
+    """Сохранить данные свечи в серверный кэш."""
+    with _server_cache_lock:
+        _server_cache["candles"][instrument_id] = {
+            "data": data,
+            "updated_at": time.time(),
+        }
+
+
+def _get_cache_stats():
+    """Статистика серверного кэша."""
+    with _server_cache_lock:
+        return {
+            "active_instruments": len(_server_cache["active"]),
+            "cached_orderbooks": len(_server_cache["orderbook"]),
+            "cached_candles": len(_server_cache["candles"]),
+            "max_instruments": MAX_CACHED_INSTRUMENTS,
+        }
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -71,6 +208,96 @@ def _load_env_from_file():
 _load_env_from_file()
 
 app = Flask(__name__, static_folder="static", static_url_path="")
+
+
+# ========== Фоновый поток обновления данных ==========
+
+def _background_update_loop():
+    """Фоновый поток: обновляет данные по активным инструментам."""
+    global _background_running
+    logger.info("Background update thread started")
+    
+    while _background_running:
+        try:
+            # Получаем список активных инструментов
+            active_ids = _get_active_instruments()
+            
+            if active_ids:
+                base_url = _get_api_url()
+                headers = _get_headers()
+                
+                # Определяем интервал (аукцион или нет)
+                auction_info = _is_auction_time()
+                is_auction = auction_info.get("is_any_auction", False)
+                
+                logger.info("Background update: %d instruments, auction=%s", 
+                           len(active_ids), is_auction)
+                
+                # Обновляем данные для каждого инструмента
+                for instrument_id in active_ids:
+                    if not _background_running:
+                        break
+                    
+                    try:
+                        # Обновляем стакан (всегда)
+                        orderbook_data = _fetch_orderbook_direct(
+                            instrument_id, base_url, headers, depth=50
+                        )
+                        if orderbook_data and "error" not in orderbook_data:
+                            _set_cached_orderbook(instrument_id, orderbook_data)
+                        
+                        # Обновляем свечи (реже, раз в минуту достаточно)
+                        candle_data = _fetch_5min_candle_direct(
+                            instrument_id, base_url, headers
+                        )
+                        if candle_data is not None:
+                            _set_cached_candle(instrument_id, candle_data)
+                        
+                        # Небольшая пауза между запросами, чтобы не превысить лимит
+                        time.sleep(0.05)
+                        
+                    except Exception as e:
+                        logger.warning("Background update error for %s: %s", 
+                                      instrument_id, e)
+                
+                # Определяем интервал до следующего обновления
+                interval = BACKGROUND_INTERVAL_AUCTION if is_auction else BACKGROUND_INTERVAL_NORMAL
+                logger.debug("Next background update in %d seconds", interval)
+                
+                # Спим с проверкой флага остановки
+                for _ in range(int(interval * 10)):
+                    if not _background_running:
+                        break
+                    time.sleep(0.1)
+            else:
+                # Нет активных инструментов — спим дольше
+                time.sleep(5)
+                
+        except Exception as e:
+            logger.exception("Background update loop error: %s", e)
+            time.sleep(5)
+    
+    logger.info("Background update thread stopped")
+
+
+def _start_background_thread():
+    """Запустить фоновый поток обновления."""
+    global _background_thread, _background_running
+    
+    if _background_thread is not None and _background_thread.is_alive():
+        return
+    
+    _background_running = True
+    _background_thread = threading.Thread(target=_background_update_loop, daemon=True)
+    _background_thread.start()
+    logger.info("Background thread started")
+
+
+def _stop_background_thread():
+    """Остановить фоновый поток."""
+    global _background_running
+    _background_running = False
+    logger.info("Background thread stop requested")
 
 # T-Invest API REST endpoints
 API_URL_PROD = "https://invest-public-api.tbank.ru/rest"
@@ -108,9 +335,32 @@ def index():
 SPOT_TICKERS = ["PLZL", "SBER", "LKOH", "GAZP", "NVTK", "VTBR", "GMKN"]
 
 
+@app.route("/api/stats")
+def api_stats():
+    """Статистика запросов и кэша за последние 5 минут."""
+    stats = _get_stats()
+    cache_stats = _get_cache_stats()
+    
+    # Информация о фоновом потоке
+    background_info = {
+        "running": _background_running,
+        "interval_auction": BACKGROUND_INTERVAL_AUCTION,
+        "interval_normal": BACKGROUND_INTERVAL_NORMAL,
+        "max_instruments": MAX_CACHED_INSTRUMENTS,
+    }
+    
+    return jsonify({
+        **stats,
+        "cache": cache_stats,
+        "background": background_info,
+    })
+
+
 @app.route("/api/futures")
 def api_futures():
     """Список фьючерсов + избранных акций (спот) для настроек. Кэшируется на 5 минут."""
+    session_id = request.args.get("session_id") or request.headers.get("X-Session-ID")
+    _record_request("/api/futures", session_id)
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
         logger.warning("TINKOFF_INVEST_TOKEN not set")
@@ -172,6 +422,98 @@ def api_futures():
     logger.info("total instruments=%s (fresh)", len(items))
     _cache_set(cache_key, items, CACHE_TTL_FUTURES)
     return jsonify({"futures": items})
+
+
+def _fetch_5min_candle_direct(instrument_id, base_url, headers):
+    """Получить цену закрытия последней 5-минутной свечи (без кэширования)."""
+    try:
+        to_ts = datetime.now(timezone.utc)
+        from_ts = to_ts - timedelta(minutes=30)
+        
+        url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles"
+        payload = {
+            "instrumentId": instrument_id,
+            "from": from_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": to_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "interval": "CANDLE_INTERVAL_5_MIN",
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        candles = data.get("candles", [])
+        
+        completed_candles = [c for c in candles if c.get("isComplete", False)]
+        if completed_candles:
+            last_candle = completed_candles[-1]
+            close_price = _quotation_to_float(last_candle.get("close"))
+            return round(close_price, 4) if close_price else None
+        elif candles:
+            if len(candles) >= 2:
+                last_candle = candles[-2]
+            else:
+                last_candle = candles[-1]
+            close_price = _quotation_to_float(last_candle.get("close"))
+            return round(close_price, 4) if close_price else None
+        return None
+    except Exception as e:
+        logger.warning("_fetch_5min_candle_direct %s: %s", instrument_id, e)
+        return None
+
+
+def _fetch_5min_candle_close(instrument_id, base_url, headers):
+    """Получить цену закрытия последней завершённой 5-минутной свечи.
+    
+    Сначала проверяет серверный кэш, затем старый кэш, затем делает запрос.
+    """
+    # Проверяем серверный кэш (заполняется фоновым потоком)
+    cached_candle = _get_cached_candle(instrument_id)
+    if cached_candle is not None:
+        return cached_candle, True
+    
+    # Проверяем старый кэш
+    cache_key = f"candle_5min_{instrument_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached, True
+
+    try:
+        to_ts = datetime.now(timezone.utc)
+        from_ts = to_ts - timedelta(minutes=30)
+        
+        url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles"
+        payload = {
+            "instrumentId": instrument_id,
+            "from": from_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": to_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "interval": "CANDLE_INTERVAL_5_MIN",
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        candles = data.get("candles", [])
+        
+        # Ищем последнюю завершённую свечу (is_complete=true)
+        completed_candles = [c for c in candles if c.get("isComplete", False)]
+        if completed_candles:
+            last_candle = completed_candles[-1]
+            close_price = _quotation_to_float(last_candle.get("close"))
+            result = round(close_price, 4) if close_price else None
+        elif candles:
+            # Если нет завершённых, берём предпоследнюю (она точно завершена)
+            if len(candles) >= 2:
+                last_candle = candles[-2]
+            else:
+                last_candle = candles[-1]
+            close_price = _quotation_to_float(last_candle.get("close"))
+            result = round(close_price, 4) if close_price else None
+        else:
+            result = None
+        
+        _cache_set(cache_key, result, CACHE_TTL_CANDLES)
+        return result, False
+    except Exception as e:
+        logger.warning("get_5min_candle %s: %s", instrument_id, e)
+        return None, False
 
 
 def _fetch_candles_for_instrument(instrument_id, base_url, headers, from_ts, to_ts):
@@ -248,8 +590,7 @@ def _fetch_candles_for_instrument(instrument_id, base_url, headers, from_ts, to_
 
 @app.route("/api/table")
 def api_table():
-    """Данные для таблицы: по списку instrument_id — последняя дневная свеча (close) + цена аукциона + отклонение + лоты.
-    Свечи кэшируются на 10 секунд для каждого инструмента."""
+    """Данные для таблицы: по списку instrument_id — последняя 5-минутная свеча (close) + цена аукциона + отклонение + лоты."""
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
         return jsonify({"error": "TINKOFF_INVEST_TOKEN not set"}), 503
@@ -259,36 +600,36 @@ def api_table():
         return jsonify({"rows": []})
     instrument_ids = [x.strip() for x in ids_param.split(",") if x.strip()]
 
-    # Период: последние 7 дней по UTC
-    to_ts = datetime.now(timezone.utc)
-    from_ts = to_ts - timedelta(days=7)
-
     base_url = _get_api_url()
     headers = _get_headers()
 
     rows = []
     cached_count = 0
     for instrument_id in instrument_ids:
-        result, is_cached = _fetch_candles_for_instrument(
-            instrument_id, base_url, headers, from_ts, to_ts
-        )
+        # Получаем цену закрытия последней 5-минутной свечи
+        candle_5min_close, is_cached = _fetch_5min_candle_close(instrument_id, base_url, headers)
+        
         # Получаем данные стакана для цены аукциона и лотов
         orderbook, _ = _fetch_orderbook(instrument_id, base_url, headers, depth=10)
         
-        # Заменяем цену открытия на цену аукциона
-        result["auction_price"] = orderbook.get("auction_price")
-        result["open"] = orderbook.get("auction_price")  # Для совместимости
+        auction_price = orderbook.get("auction_price")
         
-        # Пересчитываем отклонение от цены закрытия до цены аукциона
-        close_price = result.get("close")
-        auction_price = result.get("auction_price")
-        if close_price and auction_price and close_price != 0:
-            result["change_pct"] = round((auction_price - close_price) / close_price * 100, 2)
-        else:
-            result["change_pct"] = None
+        # Отклонение от 5-минутной свечи до цены аукциона
+        change_pct = None
+        if candle_5min_close and auction_price and candle_5min_close != 0:
+            change_pct = round((auction_price - candle_5min_close) / candle_5min_close * 100, 2)
         
-        # Добавляем лоты (количество лотов, которые пройдут по цене аукциона)
-        result["total_lots"] = orderbook.get("total_lots") or orderbook.get("auction_lots")
+        result = {
+            "instrument_id": instrument_id,
+            "name": instrument_id,
+            "close": candle_5min_close,
+            "candle_5min_close": candle_5min_close,
+            "open": auction_price,
+            "auction_price": auction_price,
+            "change_pct": change_pct,
+            "total_lots": orderbook.get("total_lots") or orderbook.get("auction_lots"),
+            "imbalance": orderbook.get("imbalance"),
+        }
         
         rows.append(result)
         if is_cached:
@@ -298,82 +639,248 @@ def api_table():
     return jsonify({"rows": rows})
 
 
-def _is_auction_time():
-    """Проверить, сейчас ли время аукциона (по московскому времени)."""
-    # Московское время = UTC + 3
+def _is_auction_time(instrument_type=None):
+    """Проверить, сейчас ли время аукциона (по московскому времени).
+    
+    Расписание аукционов:
+    - Акции (shares): 6:50-7:00 (открытие), 18:40-18:45 (закрытие), 18:45-18:50 (частичный)
+    - Фьючерсы (futures): 8:50-9:00 (открытие)
+    
+    Args:
+        instrument_type: 'shares', 'futures' или None (проверяет все аукционы)
+    """
     now_utc = datetime.now(timezone.utc)
     moscow_offset = timedelta(hours=3)
     now_msk = now_utc + moscow_offset
     
-    hour = now_msk.hour
-    minute = now_msk.minute
-    weekday = now_msk.weekday()  # 0=пн, 6=вс
+    time_minutes = now_msk.hour * 60 + now_msk.minute
     
-    time_minutes = hour * 60 + minute
+    # Аукционы для акций (shares)
+    shares_auctions = [
+        {"start": 6 * 60 + 50, "end": 7 * 60, "type": "opening", "name": "Акции: открытие"},
+        {"start": 18 * 60 + 40, "end": 18 * 60 + 45, "type": "closing", "name": "Акции: закрытие"},
+        {"start": 18 * 60 + 45, "end": 18 * 60 + 50, "type": "partial", "name": "Акции: частичный"},
+    ]
     
-    # Аукцион открытия: Пн-Пт 8:50-9:00, Сб-Вс 9:50-10:00
-    if weekday < 5:  # Пн-Пт
-        opening_start = 8 * 60 + 50  # 8:50
-        opening_end = 9 * 60  # 9:00
-    else:  # Сб-Вс
-        opening_start = 9 * 60 + 50  # 9:50
-        opening_end = 10 * 60  # 10:00
+    # Аукционы для фьючерсов (futures)
+    futures_auctions = [
+        {"start": 8 * 60 + 50, "end": 9 * 60, "type": "opening", "name": "Фьючерсы: открытие"},
+    ]
     
-    # Аукцион закрытия: 18:40-18:50 (каждый день)
-    closing_start = 18 * 60 + 40  # 18:40
-    closing_end = 18 * 60 + 50  # 18:50
+    def check_auctions(auctions):
+        for auction in auctions:
+            if auction["start"] <= time_minutes < auction["end"]:
+                return auction
+        return None
     
-    is_opening = opening_start <= time_minutes < opening_end
-    is_closing = closing_start <= time_minutes < closing_end
+    active_shares = check_auctions(shares_auctions)
+    active_futures = check_auctions(futures_auctions)
+    
+    # Определяем активный аукцион в зависимости от типа инструмента
+    if instrument_type == "shares":
+        active = active_shares
+    elif instrument_type == "futures":
+        active = active_futures
+    else:
+        # Если тип не указан, возвращаем любой активный аукцион
+        active = active_shares or active_futures
+    
+    is_any_auction = active_shares is not None or active_futures is not None
     
     return {
-        "is_auction": is_opening or is_closing,
-        "auction_type": "opening" if is_opening else ("closing" if is_closing else None),
+        "is_auction": active is not None,
+        "is_any_auction": is_any_auction,
+        "auction_type": active["type"] if active else None,
+        "auction_name": active["name"] if active else None,
+        "shares_auction": active_shares["name"] if active_shares else None,
+        "futures_auction": active_futures["name"] if active_futures else None,
         "moscow_time": now_msk.strftime("%H:%M:%S"),
     }
 
 
 def _calculate_auction_price(bids, asks):
-    """Рассчитать цену аукциона - цену, по которой пройдёт максимальное количество лотов.
-    Ищем пересечение bid и ask заявок."""
+    """Рассчитать цену сведения аукциона через кумулятивные объёмы.
+    
+    Алгоритм:
+    1. Строим кумулятивный bid (сверху вниз по цене): сколько готовы купить по цене X или ВЫШЕ
+    2. Строим кумулятивный ask (снизу вверх по цене): сколько готовы продать по цене X или НИЖЕ
+    3. Цена сведения — цена, где кумулятивные объёмы пересекаются
+    4. Лоты сделки = min(cumulative_bid, cumulative_ask) в точке пересечения
+    5. Дисбаланс = |cumulative_bid - cumulative_ask| — лоты, которые НЕ исполнятся
+    
+    Returns:
+        tuple: (auction_price, executed_lots, imbalance, imbalance_direction)
+        - auction_price: цена сведения
+        - executed_lots: количество лотов, которые исполнятся
+        - imbalance: количество лотов, которые НЕ исполнятся
+        - imbalance_direction: 'bid' если покупатели преобладают, 'ask' если продавцы
+    """
     if not bids or not asks:
-        return None, 0
+        return None, 0, 0, None
     
-    # Сортируем bids по убыванию цены, asks по возрастанию
-    sorted_bids = sorted([(_quotation_to_float(b.get("price")), int(b.get("quantity", 0))) 
-                         for b in bids], reverse=True)
-    sorted_asks = sorted([(_quotation_to_float(a.get("price")), int(a.get("quantity", 0))) 
-                         for a in asks])
+    # Парсим и сортируем заявки
+    # Bids: сортируем по убыванию цены (лучшая цена покупки — самая высокая)
+    parsed_bids = sorted(
+        [(_quotation_to_float(b.get("price")), int(b.get("quantity", 0))) for b in bids],
+        key=lambda x: x[0],
+        reverse=True
+    )
+    # Asks: сортируем по возрастанию цены (лучшая цена продажи — самая низкая)
+    parsed_asks = sorted(
+        [(_quotation_to_float(a.get("price")), int(a.get("quantity", 0))) for a in asks],
+        key=lambda x: x[0]
+    )
     
-    # Находим цену пересечения (где bid >= ask)
+    # Собираем все уникальные цены для анализа
+    all_prices = sorted(set([p for p, _ in parsed_bids] + [p for p, _ in parsed_asks]))
+    
+    if not all_prices:
+        return None, 0, 0, None
+    
+    # Строим кумулятивные объёмы для каждой цены
+    # cumulative_bid[price] = сколько лотов готовы купить по цене >= price
+    # cumulative_ask[price] = сколько лотов готовы продать по цене <= price
+    
+    # Кумулятивный bid: идём от высокой цены к низкой, накапливаем
+    cumulative_bid = {}
+    running_bid = 0
+    for price in reversed(all_prices):
+        # Добавляем объём заявок на покупку по этой цене
+        for bid_price, bid_qty in parsed_bids:
+            if bid_price == price:
+                running_bid += bid_qty
+        cumulative_bid[price] = running_bid
+    
+    # Кумулятивный ask: идём от низкой цены к высокой, накапливаем
+    cumulative_ask = {}
+    running_ask = 0
+    for price in all_prices:
+        # Добавляем объём заявок на продажу по этой цене
+        for ask_price, ask_qty in parsed_asks:
+            if ask_price == price:
+                running_ask += ask_qty
+        cumulative_ask[price] = running_ask
+    
+    # Ищем точку пересечения: цену, где cumulative_bid и cumulative_ask ближе всего
+    # Цена сведения — это цена, где min(cum_bid, cum_ask) максимален
     best_price = None
-    max_lots = 0
+    best_executed = 0
+    best_imbalance = 0
+    best_direction = None
     
-    for bid_price, bid_qty in sorted_bids:
-        for ask_price, ask_qty in sorted_asks:
-            if bid_price >= ask_price:
-                # Пересечение найдено - считаем сколько лотов пройдёт
-                lots = min(bid_qty, ask_qty)
-                if lots > max_lots:
-                    max_lots = lots
-                    # Цена аукциона - средняя между bid и ask в точке пересечения
-                    best_price = (bid_price + ask_price) / 2
-            else:
-                break  # bid_price < ask_price, дальше не будет пересечений
+    for price in all_prices:
+        cum_bid = cumulative_bid.get(price, 0)
+        cum_ask = cumulative_ask.get(price, 0)
+        
+        # Количество исполненных лотов — минимум из двух
+        executed = min(cum_bid, cum_ask)
+        
+        if executed > best_executed:
+            best_executed = executed
+            best_price = price
+            best_imbalance = abs(cum_bid - cum_ask)
+            best_direction = 'bid' if cum_bid > cum_ask else ('ask' if cum_ask > cum_bid else None)
     
-    # Если пересечений нет, используем среднюю между лучшими bid и ask
-    if best_price is None and sorted_bids and sorted_asks:
-        best_bid_price = sorted_bids[0][0]
-        best_ask_price = sorted_asks[0][0]
+    # Если не нашли пересечение, используем среднюю между лучшими bid и ask
+    if best_price is None and parsed_bids and parsed_asks:
+        best_bid_price = parsed_bids[0][0]
+        best_ask_price = parsed_asks[0][0]
         if best_bid_price and best_ask_price:
             best_price = (best_bid_price + best_ask_price) / 2
+            # В этом случае лоты не исполнятся (нет пересечения)
+            best_executed = 0
+            total_bid = sum(q for _, q in parsed_bids)
+            total_ask = sum(q for _, q in parsed_asks)
+            best_imbalance = abs(total_bid - total_ask)
+            best_direction = 'bid' if total_bid > total_ask else ('ask' if total_ask > total_bid else None)
     
-    # Округляем до 2 знаков (копейки) для рублёвых инструментов
-    return round(best_price, 2) if best_price else None, max_lots
+    # Округляем цену до 2 знаков (копейки)
+    return (
+        round(best_price, 2) if best_price else None,
+        best_executed,
+        best_imbalance,
+        best_direction
+    )
 
 
-def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
-    """Получить стакан для инструмента."""
+def _fetch_orderbook_direct(instrument_id, base_url, headers, depth=50):
+    """Получить стакан для инструмента (без кэширования).
+    
+    Args:
+        depth: глубина стакана (1, 10, 20, 30, 40, 50). По умолчанию 50 для точного расчёта.
+    """
+    try:
+        url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetOrderBook"
+        payload = {
+            "instrumentId": instrument_id,
+            "depth": depth,
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        
+        bids = data.get("bids", [])
+        asks = data.get("asks", [])
+        
+        best_bid = _quotation_to_float(bids[0].get("price")) if bids else None
+        best_ask = _quotation_to_float(asks[0].get("price")) if asks else None
+        
+        total_bid_lots = sum(int(b.get("quantity", 0)) for b in bids)
+        total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
+        
+        auction_price, executed_lots, imbalance, imbalance_direction = _calculate_auction_price(bids, asks)
+        
+        last_price = _quotation_to_float(data.get("lastPrice"))
+        close_price = _quotation_to_float(data.get("closePrice"))
+        
+        # Получаем цену закрытия последней 5-минутной свечи
+        candle_5min_close = _get_cached_candle(instrument_id)
+        if candle_5min_close is None:
+            candle_5min_close = _fetch_5min_candle_direct(instrument_id, base_url, headers)
+        
+        reference_price = candle_5min_close if candle_5min_close else close_price
+        deviation_pct = None
+        if auction_price and reference_price and reference_price != 0:
+            deviation_pct = round((auction_price - reference_price) / reference_price * 100, 2)
+        
+        return {
+            "instrument_id": instrument_id,
+            "best_bid": round(best_bid, 4) if best_bid else None,
+            "best_ask": round(best_ask, 4) if best_ask else None,
+            "spread": round(best_ask - best_bid, 4) if (best_bid and best_ask) else None,
+            "auction_price": round(auction_price, 2) if auction_price else None,
+            "executed_lots": executed_lots,
+            "imbalance": imbalance,
+            "imbalance_direction": imbalance_direction,
+            "last_price": round(last_price, 4) if last_price else None,
+            "close_price": round(reference_price, 4) if reference_price else None,
+            "candle_5min_close": candle_5min_close,
+            "deviation_pct": deviation_pct,
+            "total_bid_lots": total_bid_lots,
+            "total_ask_lots": total_ask_lots,
+            "total_lots": executed_lots,
+            "orderbook_depth": len(bids),
+        }
+    except Exception as e:
+        logger.warning("_fetch_orderbook_direct %s: %s", instrument_id, e)
+        return {"instrument_id": instrument_id, "error": str(e)}
+
+
+def _fetch_orderbook(instrument_id, base_url, headers, depth=50):
+    """Получить стакан для инструмента.
+    
+    Сначала проверяет серверный кэш (заполняется фоновым потоком),
+    затем старый кэш, затем делает прямой запрос.
+    
+    Args:
+        depth: глубина стакана (1, 10, 20, 30, 40, 50). По умолчанию 50 для точного расчёта.
+    """
+    # Проверяем серверный кэш (заполняется фоновым потоком)
+    cached_orderbook = _get_cached_orderbook(instrument_id)
+    if cached_orderbook is not None:
+        return cached_orderbook, True
+    
+    # Проверяем старый кэш
     cache_key = f"orderbook_{instrument_id}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -385,7 +892,7 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
             "instrumentId": instrument_id,
             "depth": depth,
         }
-        resp = requests.post(url, headers=headers, json=payload, timeout=10, verify=False)
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
         resp.raise_for_status()
         data = resp.json()
         
@@ -399,17 +906,22 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
         total_bid_lots = sum(int(b.get("quantity", 0)) for b in bids)
         total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
         
-        # Рассчитываем цену аукциона и количество лотов, которые пройдут
-        auction_price, auction_lots = _calculate_auction_price(bids, asks)
+        # Рассчитываем цену аукциона через кумулятивные объёмы
+        # Возвращает: (цена, исполненные лоты, дисбаланс, направление дисбаланса)
+        auction_price, executed_lots, imbalance, imbalance_direction = _calculate_auction_price(bids, asks)
         
         # Последняя цена и цена закрытия
         last_price = _quotation_to_float(data.get("lastPrice"))
         close_price = _quotation_to_float(data.get("closePrice"))
         
-        # Отклонение от цены закрытия до цены аукциона
+        # Получаем цену закрытия последней 5-минутной свечи для расчёта отклонения
+        candle_5min_close, _ = _fetch_5min_candle_close(instrument_id, base_url, headers)
+        
+        # Отклонение от последней 5-минутной свечи до цены аукциона
         deviation_pct = None
-        if auction_price and close_price and close_price != 0:
-            deviation_pct = round((auction_price - close_price) / close_price * 100, 2)
+        reference_price = candle_5min_close if candle_5min_close else close_price
+        if auction_price and reference_price and reference_price != 0:
+            deviation_pct = round((auction_price - reference_price) / reference_price * 100, 2)
         
         result = {
             "instrument_id": instrument_id,
@@ -417,17 +929,25 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
             "best_ask": round(best_ask, 4) if best_ask else None,
             "spread": round(best_ask - best_bid, 4) if (best_bid and best_ask) else None,
             "auction_price": round(auction_price, 2) if auction_price else None,
-            "auction_lots": auction_lots,  # Количество лотов, которые пройдут по цене аукциона
+            "executed_lots": executed_lots,  # Лоты, которые исполнятся
+            "imbalance": imbalance,  # Лоты, которые НЕ исполнятся
+            "imbalance_direction": imbalance_direction,  # 'bid' или 'ask'
             "last_price": round(last_price, 4) if last_price else None,
-            "close_price": round(close_price, 4) if close_price else None,
+            "close_price": round(reference_price, 4) if reference_price else None,
+            "candle_5min_close": candle_5min_close,
             "deviation_pct": deviation_pct,
-            "total_bid_lots": total_bid_lots,  # Общее количество контрактов на покупку
-            "total_ask_lots": total_ask_lots,  # Общее количество контрактов на продажу
-            "total_lots": auction_lots,  # Лоты, которые пройдут по цене аукциона
+            "total_bid_lots": total_bid_lots,
+            "total_ask_lots": total_ask_lots,
+            "total_lots": executed_lots,  # Для совместимости
+            "orderbook_depth": len(bids),  # Для отладки
         }
         
-        # Кэш на 5 секунд для стакана
-        _cache_set(cache_key, result, 5)
+        logger.debug("orderbook %s: price=%.2f, executed=%d, imbalance=%d (%s), depth=%d",
+                    instrument_id, auction_price or 0, executed_lots, imbalance, 
+                    imbalance_direction or 'none', len(bids))
+        
+        # Кэш на 2 секунды для стакана (для быстрого обновления во время аукциона)
+        _cache_set(cache_key, result, 2)
         return result, False
     except Exception as e:
         logger.warning("get_orderbook %s: %s", instrument_id, e)
@@ -439,7 +959,15 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=10):
 
 @app.route("/api/orderbook")
 def api_orderbook():
-    """Данные стакана для аукциона. Отклонение считается от вчерашней цены закрытия (как в режиме свечей)."""
+    """Данные стакана для аукциона. Отклонение считается от последней 5-минутной свечи.
+    
+    Серверное кэширование v5:
+    - Инструменты отмечаются как активные при запросе
+    - Фоновый поток обновляет данные по активным инструментам
+    - Лимит: 18 инструментов (ограничение API)
+    """
+    session_id = request.args.get("session_id") or request.headers.get("X-Session-ID")
+    _record_request("/api/orderbook", session_id)
     token = os.environ.get("TINKOFF_INVEST_TOKEN", "").strip()
     if not token:
         return jsonify({"error": "TINKOFF_INVEST_TOKEN not set"}), 503
@@ -450,30 +978,43 @@ def api_orderbook():
     
     instrument_ids = [x.strip() for x in ids_param.split(",") if x.strip()]
     
+    # Отмечаем инструменты как активные (для фонового обновления)
+    for instrument_id in instrument_ids:
+        _mark_instrument_active(instrument_id)
+    
+    # Запускаем фоновый поток, если ещё не запущен
+    _start_background_thread()
+    
     base_url = _get_api_url()
     headers = _get_headers()
-    to_ts = datetime.now(timezone.utc)
-    from_ts = to_ts - timedelta(days=7)
     
     rows = []
+    cached_count = 0
     for instrument_id in instrument_ids:
-        result, _ = _fetch_orderbook(instrument_id, base_url, headers)
-        # Отклонение — от вчерашней цены закрытия (из свечей), как в режиме «Свечи»
-        candle_result, _ = _fetch_candles_for_instrument(
-            instrument_id, base_url, headers, from_ts, to_ts
-        )
-        yesterday_close = candle_result.get("close")
-        auction_price = result.get("auction_price")
-        if yesterday_close and auction_price and yesterday_close != 0:
-            result["deviation_pct"] = round(
-                (auction_price - yesterday_close) / yesterday_close * 100, 2
-            )
-            result["close_price"] = round(yesterday_close, 4)
+        result, is_cached = _fetch_orderbook(instrument_id, base_url, headers)
         rows.append(result)
+        if is_cached:
+            cached_count += 1
     
+    # Информация об аукционах (общая для всех типов)
     auction_info = _is_auction_time()
-    logger.info("orderbook: total=%d, auction=%s", len(rows), auction_info.get("is_auction"))
-    return jsonify({"rows": rows, "auction": auction_info})
+    cache_stats = _get_cache_stats()
+    
+    # Предупреждение о лимите
+    limit_warning = None
+    if len(instrument_ids) > MAX_CACHED_INSTRUMENTS:
+        limit_warning = f"Превышен лимит: выбрано {len(instrument_ids)}, максимум {MAX_CACHED_INSTRUMENTS}. Лишние инструменты не будут обновляться в реальном времени."
+    
+    logger.info("orderbook: total=%d, cached=%d, fresh=%d, auction=%s", 
+                len(rows), cached_count, len(rows) - cached_count, 
+                auction_info.get("is_any_auction"))
+    
+    return jsonify({
+        "rows": rows, 
+        "auction": auction_info,
+        "cache_stats": cache_stats,
+        "limit_warning": limit_warning,
+    })
 
 
 def main():
