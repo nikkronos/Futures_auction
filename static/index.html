@@ -189,7 +189,6 @@
     <button type="button" id="btnSettings" onclick="try{if(typeof toggleSettings==='function')toggleSettings();}catch(e){console.error('Settings',e);}">Настройки</button>
     <button type="button" id="btnAutoRefresh" onclick="try{if(typeof toggleAutoRefresh==='function')toggleAutoRefresh();}catch(e){console.error('Auto',e);}">Авто: ВКЛ</button>
     <button type="button" id="btnNewProfile" onclick="try{if(typeof createNewProfile==='function')createNewProfile();}catch(e){console.error('Profile',e);}">+ Профиль</button>
-    <button type="button" id="btnCopyLink" onclick="try{if(typeof copyProfileLink==='function')copyProfileLink();}catch(e){console.error('Copy',e);}">Ссылка</button>
     <span class="auto-status active" id="autoStatus">обновление каждый час</span>
     <span class="mode-indicator" id="modeIndicator"></span>
     <span id="auctionBadge"></span>
@@ -227,6 +226,7 @@
         <tr>
           <th data-sort="name">Актив <span class="sort-icon"></span></th>
           <th class="num" data-sort="close">Цена 5м <span class="sort-icon"></span></th>
+          <th class="num" data-sort="daily_close">Цена д <span class="sort-icon"></span></th>
           <th class="num" data-sort="auction">Цена аукц. <span class="sort-icon"></span></th>
           <th class="num" data-sort="deviation">Откл. % <span class="sort-icon"></span></th>
           <th class="num" data-sort="lots">Лоты <span class="sort-icon"></span></th>
@@ -234,7 +234,7 @@
         </tr>
       </thead>
       <tbody id="tableBody">
-        <tr><td colspan="6">Загрузка…</td></tr>
+        <tr><td colspan="7">Загрузка…</td></tr>
       </tbody>
     </table>
   </div>
@@ -287,17 +287,6 @@
       }
       const newUrl = window.location.pathname + '?profile=' + cleanName;
       window.open(newUrl, '_blank');
-    }
-    
-    // Функция для копирования ссылки на текущий профиль
-    function copyProfileLink() {
-      const url = window.location.href;
-      navigator.clipboard.writeText(url).then(() => {
-        showMsg('Ссылка скопирована: ' + url, 'info');
-        setTimeout(() => showMsg(''), 3000);
-      }).catch(() => {
-        prompt('Скопируйте ссылку:', url);
-      });
     }
     
     // Список доступных профилей (из localStorage)
@@ -717,6 +706,10 @@
             valA = a.candle_5min_close ?? a.close ?? -Infinity;
             valB = b.candle_5min_close ?? b.close ?? -Infinity;
             break;
+          case 'daily_close':
+            valA = a.daily_close_price ?? a.close_price ?? -Infinity;
+            valB = b.daily_close_price ?? b.close_price ?? -Infinity;
+            break;
           case 'open':
             valA = a.open ?? a.auction_price ?? -Infinity;
             valB = b.open ?? b.auction_price ?? -Infinity;
@@ -761,7 +754,7 @@
     function renderTable(rows) {
       const tbody = document.getElementById('tableBody');
       if (!rows || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6">Выберите инструменты в настройках или данных пока нет.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="7">Выберите инструменты в настройках или данных пока нет.</td></tr>';
         return;
       }
       const sorted = sortRows(rows);
@@ -770,6 +763,10 @@
         
         // Цена закрытия последней 5-минутной свечи
         const closePrice = row.candle_5min_close != null ? formatPrice(row.candle_5min_close) : 
+                          (row.close_price != null ? formatPrice(row.close_price) : '—');
+        
+        // Дневное закрытие (daily_close_price из API, fallback на close_price)
+        const dailyClose = row.daily_close_price != null ? formatPrice(row.daily_close_price) :
                           (row.close_price != null ? formatPrice(row.close_price) : '—');
         
         // Цена аукциона
@@ -805,6 +802,7 @@
           '<tr>' +
           '<td>' + escapeHtml(name) + '</td>' +
           '<td class="num">' + closePrice + '</td>' +
+          '<td class="num">' + dailyClose + '</td>' +
           '<td class="num">' + auctionPrice + '</td>' +
           '<td class="num ' + devClass + '">' + devPct + (deviation != null ? '%' : '') + '</td>' +
           '<td class="num">' + executedLots + '</td>' +

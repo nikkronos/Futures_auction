@@ -244,7 +244,9 @@ def _background_update_loop():
                             instrument_id, base_url, headers, depth=50
                         )
                         if orderbook_data and "error" not in orderbook_data:
-                            _set_cached_orderbook(instrument_id, orderbook_data)
+                            # Во время аукциона не кэшируем пустой стакан (нет цены) — чтобы следующий запрос попробовал снова
+                            if not is_auction or orderbook_data.get("auction_price") is not None:
+                                _set_cached_orderbook(instrument_id, orderbook_data)
                         
                         # Обновляем свечи (реже, раз в минуту достаточно)
                         candle_data = _fetch_5min_candle_direct(
@@ -328,6 +330,71 @@ def _quotation_to_float(q) -> float:
 
 @app.route("/")
 def index():
+    """Главная страница.
+    
+    Без параметра ?profile=... показываем заглушку, чтобы доступ был только по
+    именным ссылкам вида /?profile=nikita.
+    """
+    profile = request.args.get("profile", "").strip()
+    if not profile:
+        # Простая заглушка без виджета и без настроек
+        return (
+            """
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="UTF-8">
+    <title>Виджет — доступ по личным ссылкам</title>
+    <style>
+      body {
+        margin: 0;
+        padding: 0;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        background: #14161c;
+        color: #e6e8ec;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 100vh;
+      }
+      .card {
+        background: #1f2229;
+        border-radius: 12px;
+        padding: 24px 28px;
+        max-width: 420px;
+        box-shadow: 0 20px 40px rgba(0,0,0,0.45);
+        border: 1px solid #333844;
+      }
+      h1 {
+        margin: 0 0 12px;
+        font-size: 20px;
+      }
+      p {
+        margin: 0 0 8px;
+        font-size: 14px;
+        line-height: 1.5;
+        color: #9a9faf;
+      }
+      .note {
+        margin-top: 12px;
+        font-size: 12px;
+        color: #6f7484;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Доступ к виджету по личным ссылкам</h1>
+      <p>Чтобы открыть виджет аукциона, используйте персональный URL с профилем.</p>
+      <p>Попросите свою личную ссылку.</p>
+    </div>
+  </body>
+</html>
+""",
+            200,
+            {"Content-Type": "text/html; charset=utf-8"},
+        )
+    # Есть profile — отдаём обычный виджет
     return send_from_directory(app.static_folder, "index.html")
 
 
@@ -424,11 +491,30 @@ def api_futures():
     return jsonify({"futures": items})
 
 
+def _last_completed_5min_close(candles):
+    """Из списка 5-минутных свечей вернуть close последней по времени завершённой (isComplete=true).
+    Свечи сортируем по полю time, т.к. API может вернуть в произвольном порядке.
+    """
+    if not candles:
+        return None
+    completed = [c for c in candles if c.get("isComplete", False)]
+    if not completed:
+        completed = candles
+    completed.sort(key=lambda c: c.get("time") or "")
+    last_candle = completed[-1]
+    close_price = _quotation_to_float(last_candle.get("close"))
+    return round(close_price, 4) if close_price else None
+
+
 def _fetch_5min_candle_direct(instrument_id, base_url, headers):
-    """Получить цену закрытия последней 5-минутной свечи (без кэширования)."""
+    """Получить цену закрытия последней 5-минутной свечи (без кэширования).
+    
+    Окно 3 часа (UTC), чтобы захватить последнюю завершённую 5-минутку даже перед аукционом.
+    Источник: T-Invest API GetCandles, последняя по времени завершённая свеча (isComplete=true).
+    """
     try:
         to_ts = datetime.now(timezone.utc)
-        from_ts = to_ts - timedelta(minutes=30)
+        from_ts = to_ts - timedelta(hours=3)
         
         url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles"
         payload = {
@@ -441,20 +527,7 @@ def _fetch_5min_candle_direct(instrument_id, base_url, headers):
         resp.raise_for_status()
         data = resp.json()
         candles = data.get("candles", [])
-        
-        completed_candles = [c for c in candles if c.get("isComplete", False)]
-        if completed_candles:
-            last_candle = completed_candles[-1]
-            close_price = _quotation_to_float(last_candle.get("close"))
-            return round(close_price, 4) if close_price else None
-        elif candles:
-            if len(candles) >= 2:
-                last_candle = candles[-2]
-            else:
-                last_candle = candles[-1]
-            close_price = _quotation_to_float(last_candle.get("close"))
-            return round(close_price, 4) if close_price else None
-        return None
+        return _last_completed_5min_close(candles)
     except Exception as e:
         logger.warning("_fetch_5min_candle_direct %s: %s", instrument_id, e)
         return None
@@ -478,7 +551,7 @@ def _fetch_5min_candle_close(instrument_id, base_url, headers):
 
     try:
         to_ts = datetime.now(timezone.utc)
-        from_ts = to_ts - timedelta(minutes=30)
+        from_ts = to_ts - timedelta(hours=3)
         
         url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles"
         payload = {
@@ -491,29 +564,53 @@ def _fetch_5min_candle_close(instrument_id, base_url, headers):
         resp.raise_for_status()
         data = resp.json()
         candles = data.get("candles", [])
-        
-        # Ищем последнюю завершённую свечу (is_complete=true)
-        completed_candles = [c for c in candles if c.get("isComplete", False)]
-        if completed_candles:
-            last_candle = completed_candles[-1]
-            close_price = _quotation_to_float(last_candle.get("close"))
-            result = round(close_price, 4) if close_price else None
-        elif candles:
-            # Если нет завершённых, берём предпоследнюю (она точно завершена)
-            if len(candles) >= 2:
-                last_candle = candles[-2]
-            else:
-                last_candle = candles[-1]
-            close_price = _quotation_to_float(last_candle.get("close"))
-            result = round(close_price, 4) if close_price else None
-        else:
-            result = None
-        
+        result = _last_completed_5min_close(candles)
         _cache_set(cache_key, result, CACHE_TTL_CANDLES)
         return result, False
     except Exception as e:
         logger.warning("get_5min_candle %s: %s", instrument_id, e)
         return None, False
+
+
+CACHE_TTL_DAILY = 300  # 5 минут — дневное закрытие меняется редко
+
+
+def _fetch_daily_close(instrument_id, base_url, headers):
+    """Цена закрытия последней завершённой дневной свечи (для колонки «Цена д»).
+    Кэш 5 мин. Fallback — closePrice из стакана, если свечей нет.
+    """
+    cache_key = f"candle_daily_{instrument_id}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+    try:
+        to_ts = datetime.now(timezone.utc)
+        from_ts = to_ts - timedelta(days=10)
+        url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetCandles"
+        payload = {
+            "instrumentId": instrument_id,
+            "from": from_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": to_ts.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "interval": "CANDLE_INTERVAL_DAY",
+        }
+        resp = requests.post(url, headers=headers, json=payload, timeout=15, verify=False)
+        resp.raise_for_status()
+        data = resp.json()
+        candles = data.get("candles", [])
+        completed = [c for c in candles if c.get("isComplete", False)]
+        if not completed:
+            completed = candles
+        if not completed:
+            return None
+        completed.sort(key=lambda c: c.get("time") or "")
+        last_day = completed[-1]
+        close_price = _quotation_to_float(last_day.get("close"))
+        result = round(close_price, 4) if close_price else None
+        _cache_set(cache_key, result, CACHE_TTL_DAILY)
+        return result
+    except Exception as e:
+        logger.debug("_fetch_daily_close %s: %s", instrument_id, e)
+        return None
 
 
 def _fetch_candles_for_instrument(instrument_id, base_url, headers, from_ts, to_ts):
@@ -715,23 +812,44 @@ def _calculate_auction_price(bids, asks):
         - imbalance: количество лотов, которые НЕ исполнятся
         - imbalance_direction: 'bid' если покупатели преобладают, 'ask' если продавцы
     """
-    if not bids or not asks:
+    # Если стакан полностью пустой
+    if not bids and not asks:
         return None, 0, 0, None
+    # Если есть заявки только с одной стороны, используем лучшую цену этой стороны
+    # как индикативную "цену аукциона" (лоты исполнения = 0, весь объём считается дисбалансом)
+    if bids and not asks:
+        best_bid_price = _quotation_to_float(bids[0].get("price"))
+        total_bid_lots = sum(int(b.get("quantity", 0)) for b in bids)
+        return (
+            round(best_bid_price, 2) if best_bid_price else None,
+            0,
+            total_bid_lots,
+            "bid",
+        )
+    if asks and not bids:
+        best_ask_price = _quotation_to_float(asks[0].get("price"))
+        total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
+        return (
+            round(best_ask_price, 2) if best_ask_price else None,
+            0,
+            total_ask_lots,
+            "ask",
+        )
     
-    # Парсим и сортируем заявки
-    # Bids: сортируем по убыванию цены (лучшая цена покупки — самая высокая)
+    # Парсим и сортируем заявки. Цены округляем до 4 знаков, чтобы один уровень стакана
+    # не разбивался из-за float (иначе executed_lots занижался или был 0 у фьючерсов).
+    _round = lambda x: round(x, 4)
     parsed_bids = sorted(
-        [(_quotation_to_float(b.get("price")), int(b.get("quantity", 0))) for b in bids],
+        [(_round(_quotation_to_float(b.get("price"))), int(b.get("quantity", 0))) for b in bids],
         key=lambda x: x[0],
         reverse=True
     )
-    # Asks: сортируем по возрастанию цены (лучшая цена продажи — самая низкая)
     parsed_asks = sorted(
-        [(_quotation_to_float(a.get("price")), int(a.get("quantity", 0))) for a in asks],
+        [(_round(_quotation_to_float(a.get("price"))), int(a.get("quantity", 0))) for a in asks],
         key=lambda x: x[0]
     )
     
-    # Собираем все уникальные цены для анализа
+    # Собираем все уникальные цены для анализа (уже округлённые)
     all_prices = sorted(set([p for p, _ in parsed_bids] + [p for p, _ in parsed_asks]))
     
     if not all_prices:
@@ -829,16 +947,19 @@ def _fetch_orderbook_direct(instrument_id, base_url, headers, depth=50):
         total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
         
         auction_price, executed_lots, imbalance, imbalance_direction = _calculate_auction_price(bids, asks)
-        
         last_price = _quotation_to_float(data.get("lastPrice"))
         close_price = _quotation_to_float(data.get("closePrice"))
+        # Дневное закрытие: из дневных свечей API, иначе closePrice стакана
+        daily_close_price = _fetch_daily_close(instrument_id, base_url, headers)
+        if daily_close_price is None:
+            daily_close_price = close_price
         
         # Получаем цену закрытия последней 5-минутной свечи
         candle_5min_close = _get_cached_candle(instrument_id)
         if candle_5min_close is None:
             candle_5min_close = _fetch_5min_candle_direct(instrument_id, base_url, headers)
         
-        reference_price = candle_5min_close if candle_5min_close else close_price
+        reference_price = candle_5min_close if candle_5min_close else daily_close_price
         deviation_pct = None
         if auction_price and reference_price and reference_price != 0:
             deviation_pct = round((auction_price - reference_price) / reference_price * 100, 2)
@@ -854,6 +975,7 @@ def _fetch_orderbook_direct(instrument_id, base_url, headers, depth=50):
             "imbalance_direction": imbalance_direction,
             "last_price": round(last_price, 4) if last_price else None,
             "close_price": round(reference_price, 4) if reference_price else None,
+            "daily_close_price": round(daily_close_price, 4) if daily_close_price else None,
             "candle_5min_close": candle_5min_close,
             "deviation_pct": deviation_pct,
             "total_bid_lots": total_bid_lots,
@@ -877,14 +999,21 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=50):
     """
     # Проверяем серверный кэш (заполняется фоновым потоком)
     cached_orderbook = _get_cached_orderbook(instrument_id)
+    # Во время аукциона не используем кэш с пустой ценой — даём шанс получить свежий стакан
     if cached_orderbook is not None:
-        return cached_orderbook, True
+        if _is_auction_time().get("is_any_auction") and cached_orderbook.get("auction_price") is None:
+            cached_orderbook = None
+        else:
+            return cached_orderbook, True
     
-    # Проверяем старый кэш
+    # Проверяем старый кэш (TTL 2 сек)
     cache_key = f"orderbook_{instrument_id}"
     cached = _cache_get(cache_key)
     if cached is not None:
-        return cached, True
+        if _is_auction_time().get("is_any_auction") and cached.get("auction_price") is None:
+            cached = None
+        else:
+            return cached, True
     
     try:
         url = f"{base_url}/tinkoff.public.invest.api.contract.v1.MarketDataService/GetOrderBook"
@@ -907,19 +1036,17 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=50):
         total_ask_lots = sum(int(a.get("quantity", 0)) for a in asks)
         
         # Рассчитываем цену аукциона через кумулятивные объёмы
-        # Возвращает: (цена, исполненные лоты, дисбаланс, направление дисбаланса)
         auction_price, executed_lots, imbalance, imbalance_direction = _calculate_auction_price(bids, asks)
-        
-        # Последняя цена и цена закрытия
         last_price = _quotation_to_float(data.get("lastPrice"))
         close_price = _quotation_to_float(data.get("closePrice"))
+        daily_close_price = _fetch_daily_close(instrument_id, base_url, headers)
+        if daily_close_price is None:
+            daily_close_price = close_price
         
         # Получаем цену закрытия последней 5-минутной свечи для расчёта отклонения
         candle_5min_close, _ = _fetch_5min_candle_close(instrument_id, base_url, headers)
-        
-        # Отклонение от последней 5-минутной свечи до цены аукциона
+        reference_price = candle_5min_close if candle_5min_close else daily_close_price
         deviation_pct = None
-        reference_price = candle_5min_close if candle_5min_close else close_price
         if auction_price and reference_price and reference_price != 0:
             deviation_pct = round((auction_price - reference_price) / reference_price * 100, 2)
         
@@ -934,11 +1061,12 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=50):
             "imbalance_direction": imbalance_direction,  # 'bid' или 'ask'
             "last_price": round(last_price, 4) if last_price else None,
             "close_price": round(reference_price, 4) if reference_price else None,
+            "daily_close_price": round(daily_close_price, 4) if daily_close_price else None,
             "candle_5min_close": candle_5min_close,
             "deviation_pct": deviation_pct,
             "total_bid_lots": total_bid_lots,
             "total_ask_lots": total_ask_lots,
-            "total_lots": executed_lots,  # Для совместимости
+            "total_lots": executed_lots,  # Лоты исполнения (для совместимости с фронтом)
             "orderbook_depth": len(bids),  # Для отладки
         }
         
@@ -946,8 +1074,9 @@ def _fetch_orderbook(instrument_id, base_url, headers, depth=50):
                     instrument_id, auction_price or 0, executed_lots, imbalance, 
                     imbalance_direction or 'none', len(bids))
         
-        # Кэш на 2 секунды для стакана (для быстрого обновления во время аукциона)
-        _cache_set(cache_key, result, 2)
+        # Кэш на 2 секунды; во время аукциона не кэшируем пустой стакан (нет цены)
+        if not (_is_auction_time().get("is_any_auction") and result.get("auction_price") is None):
+            _cache_set(cache_key, result, 2)
         return result, False
     except Exception as e:
         logger.warning("get_orderbook %s: %s", instrument_id, e)
@@ -992,6 +1121,12 @@ def api_orderbook():
     cached_count = 0
     for instrument_id in instrument_ids:
         result, is_cached = _fetch_orderbook(instrument_id, base_url, headers)
+        if result.get("error"):
+            candle_5min, _ = _fetch_5min_candle_close(instrument_id, base_url, headers)
+            daily_close = _fetch_daily_close(instrument_id, base_url, headers)
+            result["candle_5min_close"] = candle_5min
+            result["daily_close_price"] = round(daily_close, 4) if daily_close else None
+            result["close_price"] = round(candle_5min or daily_close or 0, 4) if (candle_5min or daily_close) else None
         rows.append(result)
         if is_cached:
             cached_count += 1
